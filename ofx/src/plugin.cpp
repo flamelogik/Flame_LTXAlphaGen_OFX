@@ -40,7 +40,9 @@
 #include "half.h"
 #include "log.h"
 #include "marker.h"
+#include "ofxColour.h"
 #include "ofxsImageEffect.h"
+#include "ofxsSupportPrivate.h"
 #include "platform.h"
 #include "process.h"
 #include "roi.h"
@@ -78,7 +80,17 @@ constexpr int kDefaultCheckW = 1920, kDefaultCheckH = 1080, kDefaultCheckFrames 
 // 3840x2176 is measured to work, 6144x3264 fails in the LTX decoder).
 constexpr int kMaxLongSide = 6000;
 
-const char* const kColourSpaces[] = {"Bypass", "ACEScg", "LogC4", "Log3G10", "LogC3", "BMD Film Gen5"};
+// Input Colour (docs/colour-auto.md): Auto asks the host (OpenFX 1.5 colour management) for the
+// source in kAutoColourspace; the worker then applies the fixed ACES 2.0 SDR view, as the old
+// dropdown's ACEScg entry did. Bypass: no request, no conversion. Setups store the index.
+const char* const kColourModeNames[] = {"Auto", "Bypass"};
+constexpr int kColourAuto = 0, kColourBypass = 1;
+constexpr const char* kAutoColourspace = "ACEScg";
+// Auto: the image output is display-referred (acescgToDisplay, marker.h), decision 76.
+constexpr const char* kOutputDisplay = "Rec.1886 Rec.709 - Display";
+// The old Input Colour dropdown (until 0.2.1): kept defined and hidden so saved setups load; a
+// node saved with a colour space other than Bypass is moved to Auto once (createInstance).
+const char* const kLegacyColourSpaces[] = {"Bypass", "ACEScg", "LogC4", "Log3G10", "LogC3", "BMD Film Gen5"};
 const char* const kPrecisions[] = {"bf16", "fp8"};
 const char* const kSimulations[] = {"none", "oom", "crash", "hang"};
 // Chunk Size (decision 61): index 0 is Auto, then chunk_plan.h kSizeLen. Setups store the index.
@@ -93,7 +105,7 @@ constexpr int kAutoMaxHold = 4;
 
 // Params. Column (group) in brackets; see CLAUDE.md "Revised layout".
 // [Alpha Gen]
-constexpr const char* kPColour = "colourSpace";
+constexpr const char* kPColourMode = "inputColour";
 constexpr const char* kPProcess = "process";
 constexpr const char* kPStatus = "status";
 constexpr const char* kPShowMarker = "showMarker";
@@ -142,6 +154,7 @@ constexpr const char* kPInitialized = "initialized";
 constexpr const char* kPNodeId = "nodeId";
 constexpr const char* kPRefreshTick = "refreshTick";
 constexpr const char* kPRoiState = "roiState";
+constexpr const char* kPColour = "colourSpace";  // the old Input Colour dropdown (hidden)
 
 constexpr const char* kTokenCaptionDefault = "Hugging Face token:";
 
@@ -311,6 +324,15 @@ std::string jsonStr(const std::string& s) {
   return o + "\"";
 }
 
+// OpenFX 1.5 colour properties through the raw property suite (the 1.4 Support library has no
+// colour calls; same approach as Matte Refine ML, plugin_ml.cpp). A string property's first
+// value, or "" when the host does not set it (a host without colour management).
+std::string propString(OfxPropertySetHandle h, const char* prop) {
+  char* s = nullptr;
+  if (!h || OFX::Private::gPropSuite->propGetString(h, prop, 0, &s) != kOfxStatOK || !s) return "";
+  return s;
+}
+
 HostInfo hostInfo() {
   HostInfo h;
   if (const auto* d = OFX::getImageEffectHostDescription()) {
@@ -391,7 +413,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
     roiLimit_ = fetchBooleanParam(kPRoiLimit);
     roiState_ = fetchStringParam(kPRoiState);
     roiInfo_ = fetchStringParam(kPRoiInfo);
-    colour_ = fetchChoiceParam(kPColour);
+    colourMode_ = fetchChoiceParam(kPColourMode);
+    legacyColour_ = fetchChoiceParam(kPColour);
     status_ = fetchStringParam(kPStatus);
     showMarker_ = fetchBooleanParam(kPShowMarker);
     precision_ = fetchChoiceParam(kPPrecision);
@@ -435,9 +458,23 @@ class AlphaGenEffect : public OFX::ImageEffect {
         precision_->setValue(d.precision);
         headroom_->setValue(d.headroomGB);
         unload_->setValue(d.unload);
+        // Input Colour: new nodes start on Auto. The param's default is Bypass so that a setup
+        // saved before it existed loads as Bypass (the old default); see below for the others.
+        colourMode_->setValue(kColourAuto);
         initialized_->setValue(true);
-        LOGI("new node: defaults [%s] precision=%s headroom=%.1f unload=%d", d.source.c_str(),
-             kPrecisions[d.precision], d.headroomGB, int(d.unload));
+        LOGI("new node: defaults [%s] precision=%s headroom=%.1f unload=%d input colour=Auto",
+             d.source.c_str(), kPrecisions[d.precision], d.headroomGB, int(d.unload));
+      } else {
+        // A setup saved with the old dropdown on a colour space (not Bypass): it wanted a
+        // conversion, so it moves to Auto once; the old param is reset so this runs only once.
+        int legacy = 0;
+        legacyColour_->getValue(legacy);
+        if (legacy > 0) {
+          colourMode_->setValue(kColourAuto);
+          legacyColour_->setValue(0);
+          LOGI("input colour: saved setup had the old Input Colour '%s': now Auto",
+               kLegacyColourSpaces[std::min(legacy, 5)]);
+        }
       }
       // Per-user values are not stored in setups; mirror them from the user config.
       const UserConfig cfg = loadUserConfig();
@@ -465,6 +502,59 @@ class AlphaGenEffect : public OFX::ImageEffect {
     // so render() also handles RGBA (decision 48). Kept: other hosts may honour it.
     prefs.setClipComponents(*dst_, OFX::ePixelComponentAlpha);
     LOGD("getClipPreferences: output set to Alpha");
+  }
+
+  int colourMode() {
+    int m = kColourAuto;
+    colourMode_->getValue(m);
+    return m == kColourBypass ? kColourBypass : kColourAuto;
+  }
+
+  // The colourspace the host delivers the Source clip in (OpenFX 1.5 kOfxImageClipPropColourspace,
+  // ofxColour.h); "" from a host without colour management.
+  std::string deliveredColourspace() {
+    return propString(src_->getPropertySet().propSetHandle(), kOfxImageClipPropColourspace);
+  }
+
+  // Input Colour (called from the factory's entry after the Support library's GetClipPreferences,
+  // whose status is st). Auto requests kAutoColourspace for the Source clip on the out args
+  // (OfxImageClipPropPreferredColourspaces_Source, ofxColour.h kOfxImageClipPropPreferredColourspaces;
+  // Flame 2027.2 honours it there and refuses it on the clip descriptor: Matte Refine ML,
+  // PHASE0_RESULTS.md "Colour probe"). The host reads out args only on kOfxStatOK. Bypass: nothing.
+  OfxStatus requestColour(OfxPropertySetHandle out, OfxStatus st) {
+    LogScope scope(nodeId_);
+    const int mode = colourMode();
+    std::string req = "no request";
+    if (mode == kColourAuto) {
+      const std::string prop = std::string(kOfxImageClipPropPreferredColourspaces) + "_" +
+                               kOfxImageEffectSimpleSourceClipName;
+      const char* names[] = {kAutoColourspace};
+      const OfxStatus s = OFX::Private::gPropSuite->propSetStringN(out, prop.c_str(), 1, names);
+      req = std::string("requested '") + kAutoColourspace + "' on " + prop + ": " + OFX::mapStatusToString(s);
+      if (st == kOfxStatReplyDefault) st = kOfxStatOK;
+    }
+    LOGI("colour: clip preferences, Input Colour %s, style '%s', %s; Source clip colourspace now '%s'",
+         kColourModeNames[mode],
+         getPropertySet().propGetString(kOfxImageEffectPropColourManagementStyle, false).c_str(), req.c_str(),
+         deliveredColourspace().c_str());
+    return st;
+  }
+
+  // GetOutputColourspace (OpenFX 1.5, unknown to the 1.4 Support library): the output is the Source
+  // picture with the overlay (decision 48). Auto: display-referred (we convert ACEScg to display before
+  // the overlay, so the overlay looks the same on any clip); Bypass: the clip's colourspace is unknown
+  // to us, so no picture and no overlay: the matte goes out on both outputs, tagged "Matte" (data). Without an answer Flame mis-tags the Auto picture (looks converted twice;
+  // Flame test, 2026-10-27). "" = no answer (host default).
+  std::string outputColourspace() {
+    LogScope scope(nodeId_);
+    if (!src_->isConnected()) return "";
+    if (colourMode() == kColourBypass) {  // the image output carries the matte: a data colourspace
+      const std::string style = getPropertySet().propGetString(kOfxImageEffectPropColourManagementStyle, false);
+      return style == kOfxImageEffectColourManagementOCIO ? "Matte" : "";  // "Matte": Flame's aces2.0 config
+    }
+    const std::string cs = kOutputDisplay;
+    LOGD("colour: output colourspace %s", cs.c_str());
+    return cs;
   }
 
   void changedParam(const OFX::InstanceChangedArgs& args, const std::string& name) override {
@@ -526,6 +616,15 @@ class AlphaGenEffect : public OFX::ImageEffect {
       } else {
         sb = src->getBounds();
         const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;
+        const std::string cs = deliveredColourspace();
+        const std::string outCs = propString(dst_->getPropertySet().propSetHandle(), kOfxImageClipPropColourspace);
+        if (!loggedDeliveredCs_ || cs != lastDeliveredCs_ || outCs != lastOutputCs_) {  // what Flame did
+          LOGI("colour: render: Input Colour %s, Source delivered in '%s', output clip tagged '%s'",
+               kColourModeNames[colourMode()], cs.c_str(), outCs.c_str());
+          lastDeliveredCs_ = cs;
+          lastOutputCs_ = outCs;
+          loggedDeliveredCs_ = true;
+        }
         const std::string key = matteKey(hashImage(*src), paramSignature(nullptr, src.get()));
         std::vector<uint16_t> half;
         if (readMatte(cacheRoot(), key, w, h, half)) {
@@ -590,6 +689,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
            dst_->getPixelComponentsProperty().c_str(), comps);
       loggedOutput_ = true;
     }
+    const bool bypassOut = colourMode() == kColourBypass;  // decision 76: no picture, no overlay
+    const bool displayOut = colourMode() == kColourAuto && deliveredColourspace() == kAutoColourspace;
     for (int y = std::max(win.y1, db.y1); y < std::min(win.y2, db.y2); ++y) {
       auto* px = static_cast<float*>(out->getPixelAddress(std::max(win.x1, db.x1), y));
       const int row = (h - 1) - (y - sb.y1);  // OFX is bottom-up, the matte top-down
@@ -604,10 +705,15 @@ class AlphaGenEffect : public OFX::ImageEffect {
         const float* sp = (rgbFromSource && inside)
                               ? static_cast<const float*>(src->getPixelAddress(x, y))
                               : nullptr;
-        if (loud) {
-          px[0] = px[1] = px[2] = v;  // the marker, grey on black
+        if (loud || bypassOut) {
+          px[0] = px[1] = px[2] = v;  // the marker, grey on black; Bypass: the matte on both outputs
         } else {
           static const float kBlack[3] = {0.0f, 0.0f, 0.0f};
+          float disp[3];
+          if (sp && displayOut) {  // Auto: ACEScg to display first, then the overlay (decision 76)
+            acescgToDisplay(sp, disp);
+            sp = disp;
+          }
           overlayPixel(sp ? sp : kBlack, realMatte ? v : 0.0f, px);
         }
         px += 3;
@@ -769,7 +875,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
   void refreshSetupUi() {
     const SetupState st = setupState();
     const bool closed = gateClosed();
-    for (const char* p : {kPColour, kPProcess, kPShowMarker, kPPurgeNode, kPPrecision, kPUnload,
+    for (const char* p : {kPColourMode, kPProcess, kPShowMarker, kPPurgeNode, kPPrecision, kPUnload,
                           kPHeadroom, kPSaveDefault, kPChunkSize, kPMerge,
                           kPRoiMargin, kPRoiMask, kPRoiLimit}) {
       try {
@@ -825,11 +931,17 @@ class AlphaGenEffect : public OFX::ImageEffect {
   // not in it: Process overwrites the whole clip anyway. With no saved state that matches the
   // current ROI settings, a frame whose alpha is a matte gets "roi=unprocessed" (never a hit).
   // `img` is the frame being keyed; the state is decided by the last Process.
+  // Input Colour: Bypass keeps the old key ("cs=Bypass"); Auto keys on the colourspace the host
+  // delivered ("cs=Auto:ACEScg", "cs=Auto:" without colour management), which decides the
+  // worker's conversion.
+  std::string colourKey() {
+    return colourMode() == kColourBypass ? std::string("Bypass") : "Auto:" + deliveredColourspace();
+  }
+
   std::string paramSignature(const RoiState* roiOverride = nullptr, const OFX::Image* img = nullptr) {
-    int colour = 0, prec = 0;
-    colour_->getValue(colour);
+    int prec = 0;
     precision_->getValue(prec);
-    std::string sig = std::string("v1|cs=") + kColourSpaces[colour] + "|prec=" + effectivePrecision(prec) +
+    std::string sig = std::string("v1|cs=") + colourKey() + "|prec=" + effectivePrecision(prec) +
                       "|model=" + (useDummy() ? kDummyVersion : kModelVersion);
     // Decisions 74/75; Off = the old key. Auto: one key part per threshold version.
     const int hold = frameHold();
@@ -1194,14 +1306,19 @@ class AlphaGenEffect : public OFX::ImageEffect {
     js << "],\"cache_root\":" << jsonStr(root)
        << ",\"worker\":"
        << jsonStr(resourcesDir() + (useDummy() ? "/worker/dummy_worker.py" : "/worker/ltx_worker.py"));
+    // Input Colour: the mode and the colourspace the host delivered the frames in (worker:
+    // colour.Converter). ocio_config stays "": the worker uses Flame's ACES 2.0 config, which has
+    // the fixed view; the host's config is only logged.
+    const std::string deliveredCs = deliveredColourspace();
+    LOGI("process: Input Colour %s, Source delivered in '%s' (host OCIO config '%s')",
+         kColourModeNames[colourMode()], deliveredCs.c_str(),
+         getPropertySet().propGetString(kOfxImageEffectPropOCIOConfig, false).c_str());
+    js << ",\"colour\":" << jsonStr(kColourModeNames[colourMode()]) << ",\"colour_tag\":" << jsonStr(deliveredCs);
     if (!useDummy()) {
-      int colour = 0;
-      colour_->getValue(colour);
       js << ",\"worker_python\":" << jsonStr(ltxPython) << ",\"worker_args\":[\"--model-dir\","
          << jsonStr(modelDir) << ",\"--embeddings\"," << jsonStr(root + "/prompt-empty.safetensors")
          << "],\"worker_socket\":" << jsonStr(workerSocket()) << ",\"model_dir\":" << jsonStr(modelDir)
-         << ",\"unload\":" << (unload ? "true" : "false")
-         << ",\"colour\":" << jsonStr(kColourSpaces[colour]) << ",\"ocio_config\":\"\",\"seed\":1234";
+         << ",\"unload\":" << (unload ? "true" : "false") << ",\"ocio_config\":\"\",\"seed\":1234";
     }
     js
        << ",\"seconds\":" << seconds << ",\"simulate\":" << jsonStr(kSimulations[sim])
@@ -1471,7 +1588,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
   OFX::BooleanParam* roiLimit_;
   OFX::StringParam* roiState_;
   OFX::StringParam* roiInfo_;
-  OFX::ChoiceParam* colour_;
+  OFX::ChoiceParam* colourMode_;
+  OFX::ChoiceParam* legacyColour_;
   OFX::StringParam* status_;
   OFX::BooleanParam* showMarker_;
   OFX::ChoiceParam* precision_;
@@ -1501,6 +1619,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
   std::string lastJobId_;
   bool inChangedParam_ = false;
   bool loggedOutput_ = false;
+  bool loggedDeliveredCs_ = false;
+  std::string lastOutputCs_;
+  std::string lastDeliveredCs_;  // render logs the delivered colourspace when it changes
   std::thread watcher_;
   std::thread setupWatcher_;
   std::atomic<bool> setupStop_{false};
@@ -1519,6 +1640,37 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
  public:
   AlphaGenFactory()
       : PluginFactoryHelper<AlphaGenFactory>(kPluginId, LTXAG_VERSION_MAJOR, LTXAG_VERSION_MINOR) {}
+
+  // Input Colour Auto: after the Support library's GetClipPreferences, the OpenFX 1.5 colour
+  // request on the out args (the 1.4 Support library has no such call; as Matte Refine ML).
+  static OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
+                         OfxPropertySetHandle out) {
+    if (std::strcmp(action, kOfxImageEffectActionGetOutputColourspace) == 0) {
+      try {
+        auto* fx = dynamic_cast<AlphaGenEffect*>(
+            OFX::Private::retrieveImageEffectPointer((OfxImageEffectHandle)handle));
+        const std::string cs = fx ? fx->outputColourspace() : "";
+        if (cs.empty()) return kOfxStatReplyDefault;
+        OFX::PropertySet(out).propSetString(kOfxImageClipPropColourspace, cs);
+        return kOfxStatOK;
+      } catch (const std::exception& e) {
+        LOGE("colour: GetOutputColourspace FAILED: %s", e.what());
+        return kOfxStatFailed;
+      }
+    }
+    const OfxStatus st = FactoryMainEntryHelper<AlphaGenFactory>::mainEntry(action, handle, in, out);
+    if (std::strcmp(action, kOfxImageEffectActionGetClipPreferences) != 0) return st;
+    if (st != kOfxStatOK && st != kOfxStatReplyDefault) return st;
+    try {
+      auto* fx = dynamic_cast<AlphaGenEffect*>(
+          OFX::Private::retrieveImageEffectPointer((OfxImageEffectHandle)handle));
+      return fx ? fx->requestColour(out, st) : st;
+    } catch (const std::exception& e) {
+      LOGE("colour: clip preferences FAILED: %s", e.what());
+      return st;
+    }
+  }
+  OfxPluginEntryPoint* getMainEntry() override { return entry; }
 
   void describe(OFX::ImageEffectDescriptor& desc) override {
     logConfigure();
@@ -1543,6 +1695,12 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     desc.setRenderTwiceAlways(false);
     desc.setSupportsMultipleClipPARs(false);
     desc.setRenderThreadSafety(OFX::eRenderInstanceSafe);
+    // Input Colour Auto: OpenFX 1.5 colour management (ofxColour.h), as Matte Refine ML declares
+    // it; a host without it ignores these, and the source arrives unconverted (no tag).
+    desc.getPropertySet().propSetString(kOfxImageEffectPropColourManagementStyle,
+                                        kOfxImageEffectColourManagementOCIO, false);
+    desc.getPropertySet().propSetString(kOfxImageEffectPropColourManagementAvailableConfigs,
+                                        "ofx-native-v1.5_aces-v1.3_ocio-v2.3", false);
   }
 
   void describeInContext(OFX::ImageEffectDescriptor& desc, OFX::ContextEnum ctx) override {
@@ -1604,12 +1762,18 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
 
     // --- Alpha Gen (5 rows) ---
     auto* gMain = group("grpMain", "Alpha Gen", main);
-    auto* colour = labelled(desc.defineChoiceParam(kPColour), "Input Colour",
-                            "Colour space of the source. It is converted to Rec.1886 through the "
-                            "ACES 2.0 SDR 100 nits (Rec.709) view before inference. Bypass: the "
-                            "source is already display-referred. LogC3 is ARRI LogC3 EI800.");
-    for (const char* c : kColourSpaces) colour->appendOption(c);
-    colour->setDefault(0);
+    auto* colour = labelled(desc.defineChoiceParam(kPColourMode), "Input Colour",
+                            "Auto: Flame converts the source to ACEScg using the clip's colour "
+                            "tag, then the model sees it through the ACES 2.0 SDR 100 nits (Rec.709) "
+                            "view; Rec.709 video is used as it is. The image output then shows the "
+                            "picture with the matte overlay in display space. Bypass: no conversion "
+                            "(the source is already display-referred); the image output shows the "
+                            "matte too.");
+    for (const char* c : kColourModeNames) colour->appendOption(c);
+    // Bypass, so setups saved before this param existed load as Bypass (the old default); new
+    // nodes are set to Auto in createInstance.
+    colour->setDefault(kColourBypass);
+    desc.addClipPreferencesSlaveParam(*colour);  // a change re-runs GetClipPreferences
     place(*colour, gMain);
     place(*button(kPProcess, "Process",
                   "Generate mattes for the whole clip in the background. Progress and Cancel "
@@ -1807,6 +1971,11 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     }
 
     // --- Hidden ---
+    auto* legacy = desc.defineChoiceParam(kPColour);  // the old Input Colour (saved setups load)
+    for (const char* c : kLegacyColourSpaces) legacy->appendOption(c);
+    legacy->setDefault(0);
+    legacy->setIsSecret(true);
+    legacy->setEvaluateOnChange(false);
     auto* roist = desc.defineStringParam(kPRoiState);
     roist->setDefault("");
     roist->setIsSecret(true);

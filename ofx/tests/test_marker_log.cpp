@@ -82,6 +82,19 @@ int main() {
           "m=0.5 gave %g %g %g", o[0], o[1], o[2]);
   }
 
+  // ACEScg -> display (decision 76), against Flame's aces2.0 config via OCIO (akflame5, 2026-10-27).
+  {
+    const float cases[3][6] = {{0.18f, 0.18f, 0.18f, 0.4894f, 0.4894f, 0.4894f},
+                               {0.2f, 0.1f, 0.05f, 0.5837f, 0.3624f, 0.2614f},
+                               {2.0f, 1.0f, 0.5f, 1.0f, 0.9459f, 0.6823f}};  // clamped to 1 (OCIO 1.5235)
+    for (const auto& c : cases) {
+      float o[3];
+      acescgToDisplay(c, o);
+      CHECK(std::abs(o[0] - c[3]) < 2e-4f && std::abs(o[1] - c[4]) < 2e-4f && std::abs(o[2] - c[5]) < 2e-4f,
+            "acescgToDisplay gave %g %g %g", o[0], o[1], o[2]);
+    }
+  }
+
   // Log: format, level filter, correlation ids, rotation.
   char tmpl[] = "/tmp/ltxag_log_test_XXXXXX";
   const std::string home = mkdtemp(tmpl);

@@ -642,6 +642,8 @@ Instance::Instance(Host& host, Effect& d, int w, int h, int frames, FrameSource 
     if (isIntLike(p->type)) p->iv = dp->props.getInt(kOfxParamPropDefault);
     else if (p->type == kOfxParamTypeDouble) p->dv = dp->props.getDbl(kOfxParamPropDefault);
     else if (p->type == kOfxParamTypeString) p->sv = dp->props.getStr(kOfxParamPropDefault);
+    auto saved = host.savedValues.find(p->name);  // a node loaded from a saved setup
+    if (saved != host.savedValues.end() && isIntLike(p->type)) p->iv = saved->second;
     effect_.params.byName[p->name] = p.get();
     effect_.params.list.push_back(std::move(p));
   }
@@ -676,6 +678,12 @@ Instance::Instance(Host& host, Effect& d, int w, int h, int frames, FrameSource 
     host_.errors.push_back("createInstance returned " + std::to_string(s));
   PropSet out;
   dispatch(kOfxImageEffectActionGetClipPreferences, nullptr, &out);  // the answer is ignored, as in Flame
+}
+
+PropSet Instance::clipPreferences() {
+  PropSet out;
+  dispatch(kOfxImageEffectActionGetClipPreferences, nullptr, &out);
+  return out;
 }
 
 Instance::~Instance() {

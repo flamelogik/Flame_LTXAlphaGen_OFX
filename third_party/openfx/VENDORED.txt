@@ -1,1 +1,6 @@
 OpenFX OFX_Release_1_4_TAG (commit a35599143c1b9b3b3e0c66eceaec7a3fd1b5c3e8), from https://github.com/AcademySoftwareFoundation/openfx — include/ and Support/{include,Library} only.
+
+Added 2026-10-27 (Input Colour Auto, OpenFX 1.5 colour management): include/ofxColour.h and
+include/ofx-native-v1.5_aces-v1.3_ocio-v2.3.h from OpenFX tag OFX_Release_1.5.1
+(commit ab779510b2655b4d11a7e01e5c521f9aa8c88976), BSD-3-Clause, unmodified (copied from
+Matte Refine OFX's vendored copy). Only these two headers: the rest stays at 1.4.

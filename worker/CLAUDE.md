@@ -38,11 +38,13 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
 
 ## Images (decisions 8/23/27/28/54, 24)
 
-- Input colour: a static dropdown `Bypass`, `ACEScg`, `LogC4`, `Log3G10`, `LogC3`, `BMD Film Gen5`
-  (OCIO names in `colour.py`; Flame's config has LogC3 only at EI800). **New entries go at the end:
-  setups store the index.** View fixed to `ACES 2.0 - SDR 100 nits (Rec.709)` on display
-  `Rec.1886 Rec.709 - Display`, as a `DisplayViewTransform` (a plain `getProcessor(src, display)`
-  skips the tone mapping and gives out-of-range values).
+- **76.** Input colour is Auto / Bypass (the old dropdown is hidden, kept for saved setups). Auto: the plugin asks
+  Flame for ACEScg; the worker gets the delivered tag (`colour_tag`, `--colour-tag`) and converts by it: no tag,
+  Rec.1886 Rec.709 or any other display/data space (sRGB, Matte, Raw) = no conversion (PROPOSED: a P3/Rec.2020
+  display clip is not gamut-converted); a scene-referenced name = the OCIO source; an unknown name fails the job.
+  The fixed view stays `ACES 2.0 - SDR 100 nits (Rec.709)` on display `Rec.1886 Rec.709 - Display`, a
+  `DisplayViewTransform` (a plain `getProcessor(src, display)` skips the tone mapping). The worker uses its own
+  config (`$OCIO`, else Flame's newest ACES 2.0), not the host's.
 - **54 (supersedes 14):** conversion runs here with PyOpenColorIO 2.6.0, not in the C++ shim (the
   fixed dropdown removed the reason; no OCIO build, no clash with Flame's OCIO). Frames travel as
   float16 in the source colour space. `applyRGB` releases the GIL: one frame per thread (16),
@@ -206,6 +208,12 @@ Not checked: Cancel / close button (exit 1), the look. On macOS job.py runs unde
   hooks): same latent (max diff 0.0), same time (85.5 vs 86.4 s at 720p × 33), GPU idle ~3 s after
   a kill. job.py waits for the worker and logs "cancel: worker pid … exited X s after SIGKILL".
   Mid-denoise: unmeasured.
+- **macOS 26 Tahoe** (M1 Ultra, 26.7.1, torch 2.14.1, 2026-10-18): matmul fp16/bf16 17.4/8.8 TFLOPS
+  and attention as on Sequoia; conv3d ~15× faster (probe 2–3 ms, bf16 ≈ fp32). 512² × 33 fp16:
+  steps 6.9 s, decode 25 s, chunk 96 s warm / 162 s cold; system test real matte 117 s (Sequoia
+  169 s). The first runs right after the upgrade took 2.8× longer (468 s; post-upgrade indexing
+  and cache rebuilds, transient). A cold transformer build (42 GB fp16, mmap) takes 77 s vs 12 s
+  warm, though the SSD reads 5.7 GB/s cold: the mmap load path, not the disk (Sequoia: 46 s).
 - **No fp8 on MPS** (`Undefined type Float8_e4m3fn`, torch's MPS dtype table,
   `aten/src/ATen/native/mps/OperationUtils.mm`): true for every Apple chip.
 - **mps-sdpa's compiled bridge** needs `ninja` on PATH and fails on stale CLT headers; its fallback

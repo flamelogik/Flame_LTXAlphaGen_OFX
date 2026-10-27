@@ -73,7 +73,7 @@ there will be seams. Make an informed choice.
 the plugin via standard Flame nodes, and connect it to the matte channel of the plugin.
 13. Click the 'Process' button to run the model. It will show a progress bar and time
 estimate. Once the processing is complete it will automatically update the viewer. 
-The image output will show an overlay, and the matte output will have the matte.
+In Auto the image output shows the picture (display-referred) with a magenta overlay of the matte, and the matte output has the matte. In Bypass both outputs show the matte.
 14. The output is cached locally to avoid re-running the model. If you're done you 
 may want to use the 'Purge Cache' button to purge those files. 
 
@@ -179,8 +179,9 @@ Batch Render are instant.
   different object can become the most prominent in the next chunk, and the matte then switches
   subject at the seam. Merging cannot repair that. If it happens, use a larger Chunk Size, or give
   the model a region of interest (the picture's alpha, see **ROI**) so it only sees your subject.
-- The model sees display-referred images. Camera log and ACEScg footage is converted for the
-  model with OCIO (see **Input Colour**); your source and output are not changed.
+- The model sees display-referred images. With **Input Colour** on Auto, Flame converts camera
+  log and ACEScg footage for the model using each clip's colour tag. The image output then shows the
+  picture in display space with the matte overlaid; the matte output is unchanged.
 - Mattes are cached per source frame and settings. Changing Input Colour or Precision gives a
   new matte (`MATTE MISSING` until you process), and switching back finds the earlier one.
 - **A processed node never passes through silently.** If its matte is missing (the cache was
@@ -300,7 +301,8 @@ repo's terms you still need to accept.
 ## Using it
 
 1. Add **LTX Alpha Gen** after your source in Batch.
-2. Set **Input Colour** to match the source (see below).
+2. Leave **Input Colour** on Auto if the clip's colour space is tagged correctly in Flame (see
+   below).
 3. Press **Process**.
 4. Watch the progress window, for example
    `Chunk 2/3 · frames 121–265 of 300 · step 5/8 · 3:12 elapsed · about 2:40 left`.
@@ -326,14 +328,19 @@ shared by all your nodes and projects; the others are saved with each node.
 
 ### Alpha Gen
 
-- **Input Colour**: the colour space of the source. The model needs display-referred images, so
-  the source is converted to Rec.1886 through Flame's ACES 2.0 config, view
-  "ACES 2.0 - SDR 100 nits (Rec.709)", before inference. Only the model's input is converted.
-  - `Bypass`: the source is already display-referred (Rec.709 / Rec.1886). No conversion.
-  - `ACEScg`, `LogC4` (ARRI LogC4), `Log3G10` (RED Log3G10 / REDWideGamutRGB),
-    `LogC3` (ARRI LogC3, EI 800), `BMD Film Gen5` (Blackmagic Film Gen5 / Wide Gamut Gen5).
+- **Input Colour**: how the source reaches the model, which needs display-referred images.
+  Only the model's input is converted.
+  - `Auto` (default for new nodes): Flame converts the source to ACEScg from the clip's colour
+    tag (any camera log, ACES or linear space Flame knows), and the plugin then applies Flame's
+    ACES 2.0 view "ACES 2.0 - SDR 100 nits (Rec.709)" on display Rec.1886. Rec.709 video (and
+    other display-referred tags) is used as it is. So the clip's tag in Flame must be right.
+  - `Bypass`: no conversion; the source is already display-referred (Rec.709 / Rec.1886). Both outputs
+    show the matte (no picture or overlay: without Flame's conversion the plugin can't show the picture
+    in display space).
 
-  A wrong setting gives a noticeably worse matte. Each setting has its own cached mattes.
+  A wrong tag gives a noticeably worse matte. Each setting, and with Auto each colour space
+  Flame delivers, has its own cached mattes. Nodes saved with an older version keep working:
+  Bypass stays Bypass, any other colour space becomes Auto (check the clip's tag).
 - **Process**: generate mattes for the whole clip in the background. It always processes the
   whole clip connected to the node.
 - **Status**: the state of this node's last job (processing, done, failed, cancelled).
@@ -455,7 +462,8 @@ separately from those without.
 
 ## Licensing
 
-- **This plugin** is licensed under the **Mozilla Public License 2.0** (see [LICENSE](LICENSE)).
+- **This plugin** is Copyright (c) 2026 Jan Klier, donated to Logik.tv, and licensed under the **Mozilla Public License 2.0**
+  (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
   The vendored OpenFX headers in `third_party/openfx` keep their own BSD licence.
 - **LTX code and weights are not part of this repository** and are never bundled. Setup
   downloads them from Lightricks' own repositories. They are under the **LTX-2.x Community

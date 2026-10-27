@@ -245,3 +245,19 @@ setup_helper.py (without the CLT, `/usr/bin/python3` is an install-prompt stub).
   refresh the viewer (applied only at the next UI event).
 - Preflight counting a resident worker only when its precision matches (refused jobs that fit); a
   flat "+9.4 GB" for a resident transformer (under-estimated HD 145 by 8.6 GB).
+
+## Input Colour Auto / Bypass (decision 76)
+
+- Param `inputColour` (default Bypass; createInstance sets new nodes to Auto), a clip-preferences slave param;
+  describe declares OCIO colour management. The old `colourSpace` stays defined but hidden: a saved setup
+  with 1-5 becomes Auto once (logged), 0 stays Bypass. "Reset to default" therefore gives Bypass.
+- `AlphaGenFactory::entry` runs after the Support library's GetClipPreferences and sets the ACEScg request,
+  turning ReplyDefault into OK (out args are read only on OK). The request is refused on the clip descriptor.
+- Cache key: Bypass keeps `cs=Bypass`; Auto is `cs=Auto:<delivered tag>`. Old non-Bypass mattes show MATTE
+  MISSING after the upgrade (71). Manifest gets `colour` and `colour_tag`.
+- GetOutputColourspace is answered: Auto `Rec.1886 Rec.709 - Display`, Bypass `Matte` (OCIO style only).
+  Render: Auto converts the ACEScg picture to display (`acescgToDisplay`, marker.h: AP1 -> Rec.709 matrix,
+  gamma 2.4, clamped; matches OCIO to 4 decimals) before `overlayPixel`, so the overlay looks the same
+  on any clip; Bypass writes the matte to RGB (no picture: the clip's colourspace is unknown and OCIO
+  stays out of the shim). A first answer of the output tag alone (Flame test 1) looked converted twice;
+  blending the overlay in linear gave a pale pink. Flame converts our output as tagged. VERIFIED (user).

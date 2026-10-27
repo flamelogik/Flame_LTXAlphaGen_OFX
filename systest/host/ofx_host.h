@@ -121,6 +121,7 @@ class Instance {
 
   Rendered render(int frame);
   void pumpUi();  // apply param changes made from non-action threads (Flame: at the next interaction)
+  PropSet clipPreferences();  // GetClipPreferences again (Flame: after a clip-preferences slave param changes)
 
   std::vector<Message> messages;  // sendMessage, in order
   std::string persistent;         // the current footer message ("" = none)
@@ -176,6 +177,7 @@ class Host {
   std::thread::id mainThread() const { return main_; }
   std::vector<std::string> errors;  // host-detected violations (recursion, wrong thread, ...)
   std::set<std::string> unknownProps;  // property gets the host could not answer (diagnosis)
+  std::map<std::string, int> savedValues;  // int/choice/bool values a new instance loads with (a saved setup)
   PropSet hostProps;
   OfxHost ofxHost{};
 

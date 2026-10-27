@@ -19,7 +19,8 @@ Status file <cache_root>/jobs/<job_id>.json is rewritten after every chunk (stat
 and at the end, so the plugin can follow progress.
 Real worker (manifest has worker_python): talks to the RESIDENT worker server over a Unix socket
 (ltx_worker.py --serve; decisions 11/19/33/55), starting it if none is running. Extra manifest
-fields: worker_socket, unload, flame_pid, colour, ocio_config, seed. holds[] (one per chunk, decisions
+fields: worker_socket, unload, flame_pid, colour ("Auto"|"Bypass"), colour_tag (the colourspace the
+host delivered; absent = ""), ocio_config, seed. holds[] (one per chunk, decisions
 74/75): the Frame Hold the worker applies; the progress weights chunks by model frames. Dummy worker: one subprocess
 per job, as before.
 Progress window (user request 2026-10-11): the worker's "stage"/"step" lines drive a Tracker;
@@ -476,7 +477,7 @@ def main() -> int:
         if m.get("worker_python"):
             request = {"job_id": job_id, "node_id": m.get("node_id", "-"), "in": m["input"],
                        "chunks": chunks, "out_prefix": out_prefix, "colour": m.get("colour", "Bypass"),
-                       "ocio_config": m.get("ocio_config", ""), "precision": m["precision"],
+                       "colour_tag": m.get("colour_tag", ""), "ocio_config": m.get("ocio_config", ""), "precision": m["precision"],
                        "model_dir": m["model_dir"], "unload": bool(m.get("unload", True)),
                        "seed": int(m.get("seed", 1234)), "holds": holds}
             channel = ResidentChannel(m, request, progress, tracker)

@@ -76,6 +76,9 @@ add_library(${BUNDLE_NAME} MODULE
   ofx/src/marker.cpp
   ofx/src/env_info.cpp)
 target_link_libraries(${BUNDLE_NAME} PRIVATE ofx_support ltxag_core ${LTXAG_PLATFORM_LIBS} pthread)
+# ofxsSupportPrivate.h: the raw property suite and the instance lookup for the OpenFX 1.5 colour
+# request, which the 1.4 Support library does not know (Input Colour Auto).
+target_include_directories(${BUNDLE_NAME} PRIVATE ${OFX_DIR}/Support/Library)
 target_compile_definitions(${BUNDLE_NAME} PRIVATE LTXAG_DEV_BUILD=$<BOOL:${LTXAG_DEV_BUILD}>
   LTXAG_VERSION="${LTXAG_VERSION}" LTXAG_GIT="${LTXAG_GIT}"
   LTXAG_VERSION_MAJOR=${LTXAG_VERSION_MAJOR} LTXAG_VERSION_MINOR=${LTXAG_VERSION_MINOR})

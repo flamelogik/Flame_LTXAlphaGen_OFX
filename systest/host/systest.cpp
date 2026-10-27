@@ -398,7 +398,7 @@ struct Ctx {
 // ---------------------------------------------------------------- fast tier
 
 const std::vector<std::string> kExpectedParams = {
-    "colourSpace", "process", "status", "showMarker", "precision", "unloadAfterRun", "headroomGB",
+    "inputColour", "colourSpace", "process", "status", "showMarker", "precision", "unloadAfterRun", "headroomGB",
     "saveAsDefault", "viewLicence", "acceptLicence", "tokenCaption", "hfToken", "download", "modelDir",
     "existingModels", "setupStatus", "debugLogging", "collectLogs", "chunkSize", "mergeMode", "roiMargin",
     "roiMaskOutside", "roiLimit", "roiInfo", "cacheDir", "cacheInfo", "purgeCache", "purgeAll", "frameHold", "simSeconds",
@@ -426,6 +426,21 @@ void testDescribe(Ctx& c) {
     const int secret = d.params.byName[n]->props.getInt(kOfxParamPropSecret);
     CHECK(secret == (c.dev ? 0 : 1), std::string(n) + (c.dev ? " visible in a dev build" : " hidden in a release build"));
   }
+  // Input Colour (docs/colour-auto.md): Auto / Bypass, default Bypass (old setups), a clip
+  // preferences slave; the old dropdown hidden but defined; OpenFX 1.5 OCIO colour management.
+  if (d.params.byName.count("inputColour") && d.params.byName.count("colourSpace")) {
+    const PropSet& ic = d.params.byName["inputColour"]->props;
+    CHECK(ic.getStr(kOfxParamPropChoiceOption, 0) == "Auto" && ic.getStr(kOfxParamPropChoiceOption, 1) == "Bypass" &&
+              ic.getStr(kOfxParamPropChoiceOption, 2).empty(),
+          "Input Colour options Auto, Bypass");
+    CHECK(ic.getInt(kOfxParamPropDefault) == 1, "Input Colour default Bypass (setups saved before it)");
+    CHECK(d.params.byName["colourSpace"]->props.getInt(kOfxParamPropSecret) == 1, "old Input Colour hidden");
+    bool slave = false;
+    for (int i = 0; i < 64; ++i) slave = slave || d.props.getStr(kOfxImageEffectPropClipPreferencesSlaveParam, i) == "inputColour";
+    CHECK(slave, "Input Colour is a clip preferences slave param");
+  }
+  CHECK(d.props.getStr("OfxImageEffectPropColourManagementStyle") == "OfxImageEffectColourManagementOCIO",
+        "OCIO colour management declared");
   if (d.params.byName.count("version")) {
     const std::string v = d.params.byName["version"]->props.getStr(kOfxParamPropDefault, 0);
     CHECK(contains(v, std::to_string(p->pluginVersionMajor) + "." + std::to_string(p->pluginVersionMinor) + ".") &&
@@ -450,7 +465,37 @@ void testCreate(Ctx& c) {
         "setup status on a fresh account: " + in->getString("setupStatus"));
   CHECK(contains(in->getString("cacheDir"), home()), "cache folder defaults to the user's home");
   CHECK(in->getString("cacheInfo") == "0.0 GB used", "cache info: " + in->getString("cacheInfo"));
+  // Input Colour: a new node is Auto and asks for ACEScg on the Source; Bypass asks for nothing.
+  const char* kPref = "OfxImageClipPropPreferredColourspaces_Source";
+  CHECK(in->getInt("inputColour") == 0, "new node: Input Colour Auto");
+  CHECK(in->clipPreferences().getStr(kPref) == "ACEScg", "Auto requests ACEScg for the Source");
+  in->setInt("inputColour", 1);
+  PropSet bypass = in->clipPreferences();
+  CHECK(!bypass.props.count(kPref), "Bypass requests nothing");
+  CHECK(bypass.getStr("OfxImageClipPropComponents_Output") == kOfxImageComponentAlpha,
+        "clip preferences still ask for an Alpha output");
   note("createInstance: " + std::to_string(in->echoes) + " echoed setValues, depth " + std::to_string(in->maxEchoDepth));
+}
+
+// Setups saved with the old Input Colour dropdown (colourSpace, index stored): Bypass stays
+// Bypass, a colour space moves to Auto once (the old param is reset).
+void testColourMigration(Ctx& c) {
+  writeConfig({});
+  Scene sc{320, 240, 9, AlphaMode::Opaque};
+  for (int legacy : {0, 4}) {
+    c.host->savedValues = {{"initialized", 1}, {"colourSpace", legacy}};
+    auto in = c.host->createInstance(sc.w, sc.h, sc.n, sc.source());
+    c.host->savedValues.clear();
+    const int want = legacy == 0 ? 1 : 0;
+    CHECK(in->getInt("inputColour") == want, "old colourSpace " + std::to_string(legacy) + " -> Input Colour " +
+                                                 std::to_string(in->getInt("inputColour")));
+    CHECK(in->getInt("colourSpace") == 0, "old param reset after the move");
+  }
+  // A setup saved with the new param keeps it.
+  c.host->savedValues = {{"initialized", 1}, {"inputColour", 1}};
+  auto in = c.host->createInstance(sc.w, sc.h, sc.n, sc.source());
+  c.host->savedValues.clear();
+  CHECK(in->getInt("inputColour") == 1, "saved Bypass stays Bypass");
 }
 
 void testGate(Ctx& c) {
@@ -547,13 +592,21 @@ void testProcess(Ctx& c) {
     checkMatte(in->render(f), sc, f, [](const float* s, int, int) { return luma(s); }, 4e-3f,
                "flow merge frame " + std::to_string(f));
 
-  // The colour space is part of the cache key.
-  in->setInt("colourSpace", 2);
-  checkFailed(in->render(5), "another colour space on a processed node");
-  CHECK(contains(in->persistent, "Matte missing"), "another colour space misses the cache: " + in->persistent);
-  in->setInt("colourSpace", 0);
+  // Input Colour is part of the cache key: the mode, and with Auto the colourspace the host
+  // delivered (this host has no colour management: no tag).
+  in->setInt("inputColour", 1);
+  checkFailed(in->render(5), "Bypass on a node processed with Auto");
+  CHECK(contains(in->persistent, "Matte missing"), "another Input Colour misses the cache: " + in->persistent);
+  in->setInt("inputColour", 0);
   in->render(5);
-  CHECK(in->persistent.empty(), "back to Bypass: cache hit again");
+  CHECK(in->persistent.empty(), "back to Auto: cache hit again");
+  PropSet& srcClip = in->effect().clips[kOfxImageEffectSimpleSourceClipName]->props;
+  srcClip.setStr("OfxImageClipPropColourspace", "ACEScg");
+  checkFailed(in->render(5), "Auto with another delivered colourspace");
+  CHECK(contains(in->persistent, "Matte missing"), "another delivered colourspace misses the cache");
+  srcClip.props.erase("OfxImageClipPropColourspace");
+  in->render(5);
+  CHECK(in->persistent.empty(), "delivered colourspace back: cache hit again");
 
   // Frame Hold (decision 74) is part of the key (Off keeps the old one); 2x halves a chunk's
   // source frames: Quarter 33 -> 17 frames, overlap 6 -> 4 chunks for 50 frames.
@@ -1002,7 +1055,7 @@ int main(int argc, char** argv) {
 #endif
   c.binary = bundleBinary(o.bundle);
   const std::vector<Test> fast = {
-      {"describe", testDescribe},     {"create_instance", testCreate},   {"gate", testGate},
+      {"describe", testDescribe},     {"create_instance", testCreate},   {"colour_migration", testColourMigration},   {"gate", testGate},
       {"not_processed", testNotProcessed}, {"process_chunks_merge_purge", testProcess},
       {"auto_hold", testAutoHold},
       {"roi", testRoi},               {"cancel", testCancel},            {"failures", testFailures},

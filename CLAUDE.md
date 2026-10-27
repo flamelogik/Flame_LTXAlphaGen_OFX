@@ -83,6 +83,15 @@ only, BSD, `VENDORED.txt`). Plugin id `com.janklier.ltx.alphagen`, version from 
 - **69.** CLAUDE.md split per module (user: keep each under ~250 lines, 2026-10-14; not a to-do
   below that); no hidden
   documentation files (no `.claude/rules/`).
+- **76. Input Colour = Auto / Bypass (user, 2026-10-27; replaces the dropdown; 27/54 still hold).**
+  Auto asks Flame for `ACEScg` (`OfxImageClipPropPreferredColourspaces_Source`, GetClipPreferences out args);
+  the worker keeps the fixed ACES 2.0 SDR `DisplayViewTransform`, so the model input is unchanged. Flame's
+  display colourspaces are encoding-only (no tone mapping), so requesting Rec.1886 was rejected. **Image
+  output:** Auto = the picture converted ACEScg -> display in the plugin (fixed matrix + gamma 2.4, checked
+  against OCIO), then the overlay, tagged `Rec.1886 Rec.709 - Display`; Bypass = the matte on both outputs,
+  tagged `Matte` (the clip's colourspace is unknown to us, and OCIO stays out of the shim, 54). VERIFIED in
+  Flame 2027.2 on several clips (user, 2026-10-27). Details: `ofx/CLAUDE.md`, `worker/CLAUDE.md`,
+  `docs/colour-auto.md`.
 - **73. PROPOSED (user, 2026-10-15): cloud GPU backend**, for community users without a big
   enough GPU who may send footage online. A Setup choice (Local / Cloud), not a sister plugin:
   colour, chunks, merge, cache, markers and progress stay local; only `job.py`'s worker channel

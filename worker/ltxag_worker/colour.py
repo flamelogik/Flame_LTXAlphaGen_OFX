@@ -10,6 +10,11 @@ was verified against Flame's ACES 2.0 config:
     instead of (1.00,0.28,0.31)).
 Display and view are fixed (decision 28). Source names verified in Flame's 2026.0 config
 (LogC3 and BMD Film Gen5 added 2026-10-11; that config only has LogC3 at EI800).
+Input Colour Auto (docs/colour-auto.md): the plugin asks Flame for the source in ACEScg and
+passes the colourspace Flame actually delivered ("colour_tag"). ACEScg (or any other scene-
+referred tag, if Flame ignored the request) is the OCIO source of the same view transform; a
+display-referred or data tag (Rec.709 video, sRGB, Matte, ...) or no tag at all is used as it is,
+like Bypass.
 applyRGB releases the GIL: one thread per frame is ~10x faster with identical output
 (reference machine, 2K: 820 -> 83 ms/frame with 16 threads).
 """
@@ -28,8 +33,13 @@ FLAME_GLOB = "/opt/Autodesk/colour_mgmt/configs/flame_configs/*/aces2.0_config/c
 
 THREADS = min(16, os.cpu_count() or 1)
 
-# Plugin dropdown label -> OCIO source colour space (decision 27). "Bypass" = no conversion.
-# Order matches the plugin's kColourSpaces (new entries go at the end: setups store the index).
+# Labels of the old plugin dropdown (until 0.2.1) -> OCIO source colour space (decision 27).
+# "Bypass" = no conversion. Still accepted (manifests, smoke tools, --colour); the plugin now sends
+# "Auto" or "Bypass" plus the delivered tag.
+AUTO = "Auto"
+# Display-referred tags Flame uses for Rec.709 video (name and aliases in Flame's 2026.0 config):
+# no conversion, and no OCIO needed to decide that.
+REC709_DISPLAY_TAGS = {DISPLAY, "Rec.709 video", "rec1886_rec709_display", "g24_rec709_display"}
 SOURCES = {
     "Bypass": None,
     "ACEScg": "ACEScg",
@@ -57,24 +67,44 @@ def default_config() -> str:
 
 
 class Converter:
-    """Source colour space -> Rec.1886 display values through the fixed ACES 2.0 SDR view."""
+    """Source colour space -> Rec.1886 display values through the fixed ACES 2.0 SDR view.
 
-    def __init__(self, label: str, config_path: str = "") -> None:
-        if label not in SOURCES:
-            raise ValueError(f"unknown input colour '{label}' (expected one of {', '.join(SOURCES)})")
-        self.label, self.source = label, SOURCES[label]
+    label: "Auto" (the source is in `tag`, the colourspace the host delivered), "Bypass", or an
+    old dropdown label (SOURCES)."""
+
+    def __init__(self, label: str, config_path: str = "", tag: str = "") -> None:
+        if label != AUTO and label not in SOURCES:
+            raise ValueError(f"unknown input colour '{label}' (expected Auto or one of {', '.join(SOURCES)})")
+        self.label, self.tag = label, tag
         self.config_path = ""
+        self.reason = ""  # why Auto does not convert
         self._cpu = None
-        if self.source is None:
-            return
+        if label == AUTO:
+            self.source = SOURCES.get(tag) or tag or None  # an old label as a tag maps as before
+            if not tag:
+                self.reason = "the host gave no colourspace tag"
+            elif tag in REC709_DISPLAY_TAGS:
+                self.reason = f"'{tag}' is display-referred"
+            if self.reason:
+                self.source = None
+                return
+        else:
+            self.source = SOURCES[label]
+            if self.source is None:
+                return
         import PyOpenColorIO as ocio  # in the LTX venv; only needed when converting
 
         self.config_path = config_path or default_config()
         if not self.config_path:
             raise ValueError("no OCIO config: set $OCIO or install Flame's ACES 2.0 config")
         config = ocio.Config.CreateFromFile(self.config_path)
-        if config.getColorSpace(self.source) is None:
+        cs = config.getColorSpace(self.source)
+        if cs is None:
             raise ValueError(f"colour space '{self.source}' is not in {self.config_path}")
+        if label == AUTO and (cs.isData() or cs.getReferenceSpaceType() == ocio.REFERENCE_SPACE_DISPLAY):
+            self.reason = f"'{tag}' is display-referred or data"
+            self.source = None
+            return
         t = ocio.DisplayViewTransform()
         t.setSrc(self.source)
         t.setDisplay(DISPLAY)
@@ -98,5 +128,8 @@ class Converter:
 
     def describe(self) -> str:
         if self._cpu is None:
+            if self.label == AUTO:
+                return f"input colour: Auto, {self.reason}: no conversion (frames used as display-referred)"
             return "input colour: Bypass (frames used as display-referred)"
-        return f"input colour: {self.source} -> {DISPLAY} / {VIEW} (config {self.config_path})"
+        prefix = f"Auto (delivered '{self.tag}'): " if self.label == AUTO else ""
+        return f"input colour: {prefix}{self.source} -> {DISPLAY} / {VIEW} (config {self.config_path})"

@@ -3,13 +3,14 @@
 Three modes:
   one-shot (job.py legacy / smoke tests):
       --in F --chunks s:l,... --out-prefix P --model-dir M --embeddings E
-      [--precision bf16|fp8] [--colour <colour.SOURCES key>] [--ocio-config C] [--hold K | --holds K,K,..]
+      [--precision bf16|fp8] [--colour Auto|<colour.SOURCES key>] [--colour-tag T] [--ocio-config C]
+      [--hold K | --holds K,K,..]
       stdout lines as in dummy_worker.py: info / progress / chunk_done / done / error
   serve (resident worker, decisions 11/19/33):
       --serve SOCKET --model-dir M --embeddings E --precision P [--flame-pid N]
       [--idle-timeout S]
       Loads the model once, then serves jobs over a Unix socket. Each connection sends one
-      JSON request line {"in", "chunks", "out_prefix", "colour", "ocio_config", "precision",
+      JSON request line {"in", "chunks", "out_prefix", "colour", "colour_tag", "ocio_config", "precision",
       "model_dir", "unload", "seed", "holds"} and receives the same stdout-style lines back. A request
       whose precision/model_dir differ gets "restart" and the server exits, so the client
       starts a matching one. The server exits after a job with "unload": true, after
@@ -536,7 +537,7 @@ def one_shot(a) -> int:  # noqa: ANN001
     t0 = time.time()
     emit("info", f"python={sys.executable} {sys.version.split()[0]} pid={os.getpid()}")
     try:
-        conv = colour.Converter(a.colour, a.ocio_config)
+        conv = colour.Converter(a.colour, a.ocio_config, a.colour_tag)
         engine = Engine(a.model_dir, a.embeddings, a.precision, emit, keep_transformer=not a.rebuild_transformer,
                         frames_on_gpu=a.frames_on_gpu)
         engine.run(a.inp, [tuple(int(v) for v in c.split(":")) for c in a.chunks.split(",")],
@@ -662,10 +663,10 @@ class Server:
         self.write_info("busy")
         log.job = req.get("job_id", "-")
         t0 = time.time()
-        log.info(f"job start (resident engine reused): chunks={req['chunks']} colour={req.get('colour')} "
+        log.info(f"job start (resident engine reused): chunks={req['chunks']} colour={req.get('colour')} tag={req.get('colour_tag', '')!r} "
                  f"unload={req.get('unload')} holds={req.get('holds')}")
         try:
-            conv = colour.Converter(req.get("colour", "Bypass"), req.get("ocio_config", ""))
+            conv = colour.Converter(req.get("colour", "Bypass"), req.get("ocio_config", ""), req.get("colour_tag", ""))
             self.engine.run(req["in"], [tuple(c) for c in req["chunks"]], req["out_prefix"], conv, emit,
                             int(req.get("seed", SEED_DEFAULT)), req.get("holds"))
             emit("done")
@@ -720,7 +721,8 @@ def main() -> int:
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--embeddings", required=True)
     ap.add_argument("--precision", default="bf16", choices=["bf16", "fp8", "fp16"])
-    ap.add_argument("--colour", default="Bypass", choices=list(colour.SOURCES))
+    ap.add_argument("--colour", default="Bypass", choices=[colour.AUTO] + list(colour.SOURCES))
+    ap.add_argument("--colour-tag", default="", help="with --colour Auto: the colourspace the frames are in")
     ap.add_argument("--ocio-config", default="")
     ap.add_argument("--seed", type=int, default=SEED_DEFAULT)
     ap.add_argument("--hold", type=int, default=1, choices=[1, 2, 4, 8], help="Frame Hold for every chunk (74)")

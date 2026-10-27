@@ -27,7 +27,10 @@ As recorded in ofx/CLAUDE.md ("Flame host behaviour"):
 - param values set from another thread are applied only at the next user action or render;
 - the output stays RGBA whatever `getClipPreferences` asks for;
 - frames are 32-bit float RGBA;
-- `sendMessage` questions get a scripted Yes, No or no answer.
+- `sendMessage` questions get a scripted Yes, No or no answer;
+- no colour management: the Source clip has no colourspace tag unless a test sets one, and the
+  clip preferences answer (the Input Colour request) is only read by tests that ask for it;
+- a test can create a node "from a saved setup" (`Host::savedValues`, e.g. the old Input Colour).
 
 The host also reports any action or message that arrives from a non-main thread.
 
@@ -78,7 +81,7 @@ The full tier needs a completed Setup for the user running it.
   the blend weights (unit tests cover those: `chunk_plan`, `test_job`).
 - Not covered: Download/Setup (`tools/setup_smoke.sh`), View Licence, the Flame hook's
   auto-refresh (job.py only writes refresh markers for a process named `flame`), the layout,
-  OCIO colour conversion with the real model, 6K, resident-worker reuse between jobs
+  whether Flame honours the Input Colour request, OCIO colour conversion with the real model, 6K, resident-worker reuse between jobs
   (`tools/resident_smoke.py`).
 
 ## Why it is built this way (decision 67, user choices 2026-10-13)
