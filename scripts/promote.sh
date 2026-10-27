@@ -67,5 +67,6 @@ if [ "${DRY_RUN:-0}" = 1 ]; then echo "DRY_RUN: $TAG would be promoted"; exit 0;
   echo
   gh release view "$TAG" --json body --jq .body | awk 'banner && /^>/ {next} {banner=0; print}' banner=1
 } >"$D/notes.md"
-gh release edit "$TAG" --prerelease=false --latest --notes-file "$D/notes.md"
+TITLE=$(gh release view "$TAG" --json name --jq .name); TITLE=${TITLE% (pre-release)}
+gh release edit "$TAG" --prerelease=false --latest --title "$TITLE" --notes-file "$D/notes.md"
 echo "promoted $TAG: no longer a pre-release, marked Latest"
