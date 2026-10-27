@@ -1142,6 +1142,7 @@ int main(int argc, char** argv) {
     x << "  </testcase>\n";
   }
   x << "</testsuite>\n";
+  x.close();  // _exit below skips the destructor, which left the file empty
   std::printf("ltxag_systest %s on %s: %zu tests, %d failed, %d skipped, %.0f s\n", o.tier.c_str(), platform.c_str(),
               results.size(), failed, skipped, now() - t0);
   std::fflush(stdout);

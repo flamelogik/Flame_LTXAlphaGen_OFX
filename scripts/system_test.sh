@@ -8,8 +8,8 @@
 #   [TIERS="fast full"] [ONLY=test1,test2] scripts/system_test.sh
 # Leave a platform's *_HOST unset to skip it. *_WORK must be on a local disk of that machine
 # (the worker's Unix socket lives there); the test machines need a completed Setup for the full
-# tier. Results go to dist/systest/<commit>[-dirty]/<linux|macos>/; a platform that passed both
-# tiers on a clean checkout gets a PASS file there, which scripts/package_release*.sh require.
+# tier. Results go to dist/systest/<commit>[-dirty]/<linux|macos>/. For testing a published
+# release on one machine, use scripts/maintainer_test.sh instead (systest/README.md "Releases").
 set -uo pipefail
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 TIERS=${TIERS:-fast full}
@@ -26,7 +26,6 @@ run_platform() {
   local name=$1 host=$2 remote=$3 work=$4 cmake=$5 cargs=$6
   local out="$RESULTS/$name" log="$RESULTS/$name.log"
   mkdir -p "$out"
-  rm -f "$out/PASS"
   {
     echo "[$name] sync to $host:$remote/src"
     ssh "$host" "mkdir -p '$remote/src' '$work'" &&
@@ -51,10 +50,6 @@ run_platform() {
     sed "s/^/[$name]   /" "$out/DONE"
     local ok=1
     for t in $TIERS; do grep -qx "$t 0" "$out/DONE" || ok=0; done
-    if [ $ok = 1 ] && [ -z "$DIRTY" ] && [[ " $TIERS " == *" fast "* ]] && [[ " $TIERS " == *" full "* ]] && [ -z "$ONLY" ]; then
-      date -u +%FT%TZ >"$out/PASS"
-      echo "[$name] PASS recorded for $ID"
-    fi
     [ $ok = 1 ]
   } >"$log" 2>&1
 }
@@ -84,5 +79,4 @@ for n in "${NAMES[@]}"; do
     [ -f "$f" ] && echo "$n $t: $(grep -E '^ltxag_systest .* tests,' "$f" | tail -1)"
   done
 done
-[ -n "$DIRTY" ] && echo "note: uncommitted changes, so no PASS was recorded (release packaging needs one)"
 exit $RC

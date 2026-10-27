@@ -1,0 +1,35 @@
+# Promotes a pre-release made by release.yml once maintainers have tested it on real hardware:
+# needs ltxag-test-linux-<tag>.json and ltxag-test-macos-<tag>.json on the release, both PASS and
+# both for the release's own tarballs (sha256). Logic in scripts/promote.sh; CONTRIBUTING.md "Releases".
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to promote (e.g. v0.2.2)
+        required: true
+        type: string
+      dry_run:
+        description: Only check, do not change the release
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Check the hardware results and promote
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: scripts/promote.sh "$TAG"

@@ -1,6 +1,6 @@
 # System test
 
-An end-to-end test of the plugin bundle, run before every release package. A small OFX host
+An end-to-end test of the plugin bundle, run before every release is promoted. A small OFX host
 (`host/`) loads the bundle the way Flame does and drives it through the same actions a user
 triggers: create a node, press Process, wait for the job, render frames, press Cancel. The real
 job controller (`job.py`) and worker run underneath. Results are compared with what is known
@@ -50,13 +50,50 @@ test closes the ones it caused.
 ## When
 
 - **Fast tier:** after every completed feature or fix, on both platforms
-  (`TIERS=fast scripts/system_test.sh`).
-- **Both tiers:** for every release, on the clean commit being released, before
-  `package_release*.sh` (they check for the recorded `PASS`).
+  (`TIERS=fast scripts/system_test.sh`, or `scripts/maintainer_test.sh --dev` on one machine).
+  CI runs it for every release build (below).
+- **Full tier:** for every release, on real hardware, before the pre-release is promoted (below).
+
+## Releases (decision 67 as revised for CI)
+
+| Where | What runs | What it proves |
+|---|---|---|
+| CI (`.github/workflows/release.yml`, hosted runners, no GPU) | release build + ctest, then the **fast** tier on a dev build of the same commit, on Rocky 9 (container) and macOS arm64; package + `.sha256` | it builds where Flame can load it (glibc <= 2.34 checked), the unit tests pass, the plugin logic works end to end with the dummy worker |
+| Maintainer hardware (`scripts/maintainer_test.sh <tag>`) | the **full** tier on the exact packaged bundle from the release | the real model makes a correct matte, the release gate as shipped, VRAM record, Unload GPU, Cancel during denoising |
+| Only Flame (by hand) | layout, the Flame Python hook, anything listed under "Limits" | |
+
+Hosted runners have no usable GPU: the fast tier's `memory_warning` test skips there ("no GPU
+memory information"), like `mac_fp8_refused` on Linux.
+
+1. Push a tag `v<LTXAG_VERSION>` (or `v<LTXAG_VERSION>-<suffix>`). CI builds and smoke-tests both
+   platforms; only if both pass it publishes a GitHub **pre-release** with both tarballs and
+   their `.sha256` files (`workflow_dispatch` runs the same jobs without publishing).
+2. On a Linux GPU machine and on an Apple Silicon Mac, each with a completed Setup for the user
+   running it, check out the tag and run
+   `scripts/maintainer_test.sh <tag>` (downloads the platform's tarball with `gh`, checks its
+   sha256, extracts it, builds only the test host from the checkout, runs the full tier on the
+   packaged bundle). Without `gh`: `scripts/maintainer_test.sh <tarball> [--sha256 <hash>]
+   [--tag <tag>]`. It writes `ltxag-test-<linux|macos>-<tag>.json`: tag, platform, tarball name and
+   the sha256 actually tested, source commit (from the bundle's Version label), test host commit,
+   pass/fail/skip counts from the junit file, machine (OS, CPU, RAM, GPU and driver or chip; no
+   host or user names), timestamp, overall PASS/FAIL. Logs stay in
+   `~/.cache/ltx-alphagen/maintainer-test/run/out-full/` (`--work` to move it; a local disk).
+3. Upload the result: `gh release upload <tag> ltxag-test-<platform>-<tag>.json`.
+4. Run the **promote** workflow (`.github/workflows/promote.yml`, input `tag`; logic in
+   `scripts/promote.sh`). It needs a PASS file for both platforms whose tarball name and sha256
+   equal the release's assets, then clears the pre-release flag, marks the release Latest and
+   puts the hardware results at the top of the notes. `dry_run` only checks.
 
 ## Running
 
-All machines in parallel, from the development checkout:
+One machine, by hand: `scripts/maintainer_test.sh --dev` (fast tier on a dev build of this
+checkout; needs no GPU, model or Setup; on macOS set `JOB_PYTHON` to a python with numpy), or
+`systest/run_all.sh --build-root <dir> --work <dir>` (both tiers on dev and release builds of
+this checkout), or one tier against an existing build with
+`systest/run_systest.sh --tier fast --bundle … --host … --work …`. The full tier needs a
+completed Setup for the user running it.
+
+All machines in parallel, from a development checkout (optional wrapper, over ssh):
 
 ```
 LINUX_HOST=<rocky host> LINUX_WORK=<local-disk folder there> \
@@ -66,14 +103,9 @@ scripts/system_test.sh
 ```
 
 Results go to `dist/systest/<commit>/<linux|macos>/` (`out-<tier>/junit-<tier>.xml`,
-`console.log`, `logs.tar.gz` with the plugin/job/worker logs). A platform that passed both tiers
-on a clean checkout gets a `PASS` file. `scripts/package_release.sh` and
-`package_release_mac.sh` refuse to package without one (`SKIP_SYSTEST=1` overrides). Options:
-`TIERS=fast` (quick check), `ONLY=roi,cancel` (single tests; never records a PASS).
-
-On one machine by hand: `systest/run_all.sh --build-root <dir> --work <dir>`, or one tier
-against an existing build with `systest/run_systest.sh --tier fast --bundle … --host … --work …`.
-The full tier needs a completed Setup for the user running it.
+`console.log`, `logs.tar.gz` with the plugin/job/worker logs). Options: `TIERS=fast` (quick
+check), `ONLY=roi,cancel` (single tests). Packaging no longer checks for a recorded pass: the
+gate is the promotion step above.
 
 ## Limits
 

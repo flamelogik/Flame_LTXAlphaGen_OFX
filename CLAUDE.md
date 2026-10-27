@@ -78,8 +78,17 @@ only, BSD, `VENDORED.txt`). Plugin id `com.janklier.ltx.alphagen`, version from 
   beat MPS; **dropped** (user, 2026-10-14: the M5 benchmark shows no gain, `worker/CLAUDE.md`);
   `mlx/PORT_MAP.md` stays as a model reference. Detail: `worker/CLAUDE.md`, `ofx/CLAUDE.md`.
 - **67.** **System test**: a Flame-like OFX host of our own; fast tier (dev build, dummy) after
-  every feature, both tiers (full = release build, real model) before every release package
-  (`systest/README.md`, "Conventions").
+  every feature; the full tier (release build, real model) is run by a maintainer on real hardware
+  against the CI-built release (77), no longer as a gate in packaging (`systest/README.md`).
+- **77. PROPOSED (agent-built 2026-10-27, not yet run on GitHub): release process.** Pushing a tag
+  `v<LTXAG_VERSION>` runs `.github/workflows/release.yml`: Rocky 9 container (Linux) + `macos-15`
+  arm64, release build, ctest, fast system tier on a dev build (dummy worker, no GPU), package
+  (`scripts/package_release.sh`, local by default, `HOST=` for ssh) + `.sha256`; only if both pass, a
+  GitHub **pre-release** is published. A maintainer runs `scripts/maintainer_test.sh <tag>` (full tier
+  on the packaged bundle) on a GPU Linux box and a Mac and uploads `ltxag-test-<platform>-<tag>.json`
+  (tarball sha256, no host or user names); `promote.yml` (`scripts/promote.sh`) clears the pre-release
+  flag only with a matching PASS for both. Mac CI builds pin the deployment target to 15.0.
+  `scripts/system_test.sh` stays as an optional multi-machine wrapper. `CONTRIBUTING.md` documents it.
 - **69.** CLAUDE.md split per module (user: keep each under ~250 lines, 2026-10-14; not a to-do
   below that); no hidden
   documentation files (no `.claude/rules/`).
@@ -147,7 +156,8 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; no separate legal read: 
 
 - **Linux: build on Rocky 9** (glibc ≤ 2.34, GCC 11): newer distributions make binaries Flame
   can't load. `HOST=<ssh host> scripts/build_remote.sh` (sync, release build, ctest);
-  `scripts/package_release.sh` makes the tarball in `dist/` (git-ignored). Local test builds on
+  `scripts/package_release.sh` makes the tarball in `dist/` (git-ignored; local, or `HOST=` over ssh;
+  CI uses the local mode, 77). Local test builds on
   any Linux: `cmake -S . -B <build> -DWORKER_TEST_PYTHON=<python with numpy importable under -I>`.
 - **Build facts:** **C++14** (OFX 1.4 Support uses dynamic exception specs and `auto_ptr`);
   **libstdc++ linked dynamically** (Flame uses the system GCC 11 one; `libstdc++-static` isn't on
@@ -161,7 +171,7 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; no separate legal read: 
 - **macOS** (Apple Silicon, Command Line Tools: clang 17, MacOSX 26.2 SDK, cmake 4.4):
   `scripts/build_mac.sh`, `scripts/package_release_mac.sh` (`HOST`, `REMOTE`, `CMAKE`,
   `CMAKE_ARGS`; `LTXAlphaGen-<v>-macos-arm64.tar.gz`). Bundle binary in
-  `Contents/MacOS/LTXAlphaGen.ofx` (arm64, minos 15.0) with a generated minimal `Info.plist`
+  `Contents/MacOS/LTXAlphaGen.ofx` (arm64, minos 15.0 only if built with `-DCMAKE_OSX_DEPLOYMENT_TARGET=15.0`: the published v0.2.1 has minos 26.0) with a generated minimal `Info.plist`
   (whether Flame needs it: UNVERIFIED); exports via `-Wl,-exported_symbols_list` and the vendored
   `osxSymbols`; ld's default `-undefined error` replaces `--no-undefined`;
   links Metal + Foundation, libc++, libobjc, libSystem; signed ad hoc only (no notarisation). A CLT
@@ -220,9 +230,9 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; no separate legal read: 
   done, run `TIERS=fast scripts/system_test.sh` on both platforms (invocation in
   `CLAUDE.local.md`) and include its results. A failure means it is not done; if a machine can't
   be reached, say which tier and platform was not run and why.
-- **Release packages only after a full pass** (decision 67): commit, run `scripts/system_test.sh`
-  (both tiers, both platforms) on the clean commit, then `package_release*.sh`, which check for
-  the recorded `PASS`. Check the Mac for other GPU jobs before the full tier.
+- **Releases (decisions 67/77):** CI builds, smoke-tests (ctest + fast tier) and publishes a pre-release
+  from a `v*` tag; a maintainer runs the full tier (`scripts/maintainer_test.sh <tag>`) on both
+  platforms and promotes. Check the Mac for other GPU jobs before the full tier.
 - Keep these files current: record decisions with their numbers and reasons in the module file
   (and a line in the index above), move items between PROPOSED/OPEN/DECIDED, add dead ends. Keep
   each file under ~250 lines. Nothing machine- or person-specific: that goes in `CLAUDE.local.md`.

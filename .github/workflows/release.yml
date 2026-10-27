@@ -1,0 +1,160 @@
+# Builds the release packages on Linux (Rocky 9) and macOS (Apple Silicon), smoke-tests them
+# without a GPU, and publishes them as a GitHub PRE-RELEASE. A maintainer then runs the full
+# system test on real hardware and promotes the release (promote.yml; CONTRIBUTING.md "Releases").
+#   push of a tag v<LTXAG_VERSION> (or v<LTXAG_VERSION>-<suffix>): build, test, publish
+#   workflow_dispatch: build and test only (a dry run; nothing is published)
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: linux (Rocky 9)
+    runs-on: ubuntu-24.04
+    # Rocky 9 = glibc 2.34 and GCC 11, what Flame loads (CLAUDE.md "Building").
+    container: rockylinux/rockylinux:9
+    steps:
+      - name: Build tools
+        run: dnf -y -q install git cmake gcc-c++ make python3 python3-numpy binutils file findutils procps-ng
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Tag matches LTXAG_VERSION
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          V=$(sed -n 's/^set(LTXAG_VERSION "\([0-9.]*\)")/\1/p' CMakeLists.txt)
+          case "$GITHUB_REF_NAME" in
+            "v$V" | "v$V"-*) echo "tag $GITHUB_REF_NAME, version $V" ;;
+            *) echo "::error::tag $GITHUB_REF_NAME does not match LTXAG_VERSION $V in CMakeLists.txt (expected v$V or v$V-<suffix>)"; exit 1 ;;
+          esac
+
+      - name: Release build, ctest, package
+        shell: bash
+        run: GIT=${GITHUB_SHA::7} scripts/package_release.sh
+
+      - name: Smoke test (system test fast tier, dev build, dummy worker)
+        shell: bash
+        run: scripts/maintainer_test.sh --dev --work "$RUNNER_TEMP/systest" --out "$RUNNER_TEMP"
+
+      # The work folder stays outside the checkout (the worker socket path must stay short).
+      - name: Collect the smoke-test logs
+        if: always()
+        shell: bash
+        run: mkdir -p build-smoke && cp -R "$RUNNER_TEMP/systest/run/out-fast" "$RUNNER_TEMP"/ltxag-test-*.json build-smoke/ || true
+
+      - name: Keep the smoke-test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: smoke-linux
+          path: build-smoke
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: release-linux
+          path: dist/LTXAlphaGen-*-rocky9.tar.gz*
+          if-no-files-found: error
+
+  macos:
+    name: macos (Apple Silicon)
+    runs-on: macos-15
+    env:
+      # Keep the binary loadable on macOS 15 whatever the runner's SDK (CLAUDE.md: minos 15.0).
+      MAC_CMAKE_ARGS: -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Tag matches LTXAG_VERSION
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          V=$(sed -n 's/^set(LTXAG_VERSION "\([0-9.]*\)")/\1/p' CMakeLists.txt)
+          case "$GITHUB_REF_NAME" in
+            "v$V" | "v$V"-*) echo "tag $GITHUB_REF_NAME, version $V" ;;
+            *) echo "::error::tag $GITHUB_REF_NAME does not match LTXAG_VERSION $V in CMakeLists.txt (expected v$V or v$V-<suffix>)"; exit 1 ;;
+          esac
+
+      - name: Python with numpy (worker tests, job.py)
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/python" -m pip install --quiet numpy
+          echo "PY=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
+          uname -a; sw_vers; xcrun --show-sdk-path; cmake --version | head -1
+
+      - name: Release build, ctest, package
+        shell: bash
+        run: GIT=${GITHUB_SHA::7} CMAKE_ARGS="-DWORKER_TEST_PYTHON=$PY $MAC_CMAKE_ARGS" scripts/package_release.sh
+
+      - name: Smoke test (system test fast tier, dev build, dummy worker)
+        shell: bash
+        run: |
+          JOB_PYTHON=$PY CMAKE_ARGS="-DWORKER_TEST_PYTHON=$PY $MAC_CMAKE_ARGS" \
+            scripts/maintainer_test.sh --dev --work "$RUNNER_TEMP/systest" --out "$RUNNER_TEMP"
+
+      # The work folder stays outside the checkout (the worker socket path must stay short).
+      - name: Collect the smoke-test logs
+        if: always()
+        shell: bash
+        run: mkdir -p build-smoke && cp -R "$RUNNER_TEMP/systest/run/out-fast" "$RUNNER_TEMP"/ltxag-test-*.json build-smoke/ || true
+
+      - name: Keep the smoke-test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: smoke-macos
+          path: build-smoke
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: release-macos
+          path: dist/LTXAlphaGen-*-macos-arm64.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    name: publish pre-release
+    needs: [linux, macos]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create the pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          V=$(sed -n 's/^set(LTXAG_VERSION "\([0-9.]*\)")/\1/p' CMakeLists.txt)
+          ls -la dist
+          (cd dist && sha256sum -c ./*.sha256)
+          SHA_LINUX=$(cut -d' ' -f1 "dist/LTXAlphaGen-$V-rocky9.tar.gz.sha256")
+          SHA_MAC=$(cut -d' ' -f1 "dist/LTXAlphaGen-$V-macos-arm64.tar.gz.sha256")
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          sed -e "s|@VERSION@|$V|g" -e "s|@TAG@|$GITHUB_REF_NAME|g" -e "s|@COMMIT@|${GITHUB_SHA::7}|g" \
+              -e "s|@SHA_LINUX@|$SHA_LINUX|g" -e "s|@SHA_MAC@|$SHA_MAC|g" -e "s|@RUN_URL@|$RUN_URL|g" \
+              packaging/RELEASE_NOTES_TEMPLATE.md > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease \
+            --title "LTX Alpha Gen $V (pre-release)" --notes-file "$RUNNER_TEMP/notes.md" \
+            dist/LTXAlphaGen-*.tar.gz dist/LTXAlphaGen-*.tar.gz.sha256

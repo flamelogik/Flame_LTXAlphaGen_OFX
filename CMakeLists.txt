@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
+# macOS: the bundle must load on macOS 15 whatever macOS and SDK built it (the published v0.2.1 was
+# built on macOS 26 and says minos 26.0). Ignored on other platforms; must come before project().
+set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS version")
 project(LTXAlphaGenOFX LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 14)  # OFX 1.4 Support uses throw() specs and auto_ptr
