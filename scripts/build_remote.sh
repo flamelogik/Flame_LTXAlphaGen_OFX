@@ -3,10 +3,10 @@
 #   HOST=<ssh host> scripts/build_remote.sh
 # Builds in the user's home only; never touches /usr/OFX/Plugins or the live
 # ComfyUI install. The one-time install symlink is done by hand with sudo:
-#   sudo ln -s ~/LTX_OFX_build/build/LTXAlphaGen.ofx.bundle /usr/OFX/Plugins/
+#   sudo ln -s ~/ClaudeCode/LTX_OFX_build/build/LTXAlphaGen.ofx.bundle /usr/OFX/Plugins/
 set -euo pipefail
 HOST=${HOST:?set HOST to the ssh name of the Rocky 9 build machine}
-REMOTE=${REMOTE:-LTX_OFX_build}
+REMOTE=${REMOTE:-ClaudeCode/LTX_OFX_build}
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 
 ssh "$HOST" "mkdir -p $REMOTE/src"

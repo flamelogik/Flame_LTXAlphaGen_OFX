@@ -3,10 +3,10 @@
 # Flame's GCC 11 libstdc++) and copy it back to dist/.
 #   HOST=<ssh host> scripts/package_release.sh  ->  dist/LTXAlphaGen-<version>-rocky9.tar.gz
 # Contents: LTXAlphaGen.ofx.bundle (release build), install.sh, README.md, LICENSE.
-# Builds in ~/LTX_OFX_build/release (separate from the dev/test build); never installs anything.
+# Builds in ~/ClaudeCode/LTX_OFX_build/release (separate from the dev/test build); never installs anything.
 set -euo pipefail
 HOST=${HOST:?set HOST to the ssh name of the Rocky 9 build machine}
-REMOTE=${REMOTE:-LTX_OFX_build}
+REMOTE=${REMOTE:-ClaudeCode/LTX_OFX_build}
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION=$(sed -n 's/^set(LTXAG_VERSION "\([0-9.]*\)")/\1/p' "$SRC/CMakeLists.txt")
 [ -n "$VERSION" ] || { echo "no LTXAG_VERSION in CMakeLists.txt" >&2; exit 1; }

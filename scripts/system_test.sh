@@ -61,8 +61,8 @@ run_platform() {
 
 PIDS=() NAMES=() LOGS=()
 if [ -n "${LINUX_HOST:-}" ]; then
-  run_platform linux "$LINUX_HOST" "${LINUX_REMOTE:-LTX_OFX_build/systest}" \
-    "${LINUX_WORK:-${LINUX_REMOTE:-LTX_OFX_build/systest}/work}" cmake "" &
+  run_platform linux "$LINUX_HOST" "${LINUX_REMOTE:-ClaudeCode/LTX_OFX_build/systest}" \
+    "${LINUX_WORK:-${LINUX_REMOTE:-ClaudeCode/LTX_OFX_build/systest}/work}" cmake "" &
   PIDS+=($!) NAMES+=(linux) LOGS+=("$RESULTS/linux.log")
 fi
 if [ -n "${MAC_HOST:-}" ]; then
