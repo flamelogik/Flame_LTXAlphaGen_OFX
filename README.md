@@ -6,13 +6,15 @@ Generate an alpha matte from an RGB clip, directly in Flame, using Lightricks'
 **LTX-2.5 Alpha Gen** IC-LoRA. It runs locally on your own GPU: NVIDIA on Linux, or Apple
 Silicon on macOS. There is no cloud service and no ComfyUI.
 
-> **Status: v0.2.1.** The plugin works in Flame and has produced good mattes on real footage.
+> **Status: v1.0.** The plugin works in Flame and has produced good mattes on real footage.
 > Setup is guided, and the viewer refreshes by itself when a job finishes. Since 0.1.4: **macOS
 > on Apple Silicon** (much slower than a large NVIDIA GPU; see [macOS](#macos-apple-silicon));
 > since 0.1.5: about 1.4× faster processing on M1-family Macs (an fp16 copy of the model); new in
 > 0.2: a processed node whose matte goes missing shows MATTE MISSING instead of passing through;
 > new in 0.2.1: **Frame Hold** for clips with fast motion (sharper, steadier edges; `Auto` holds
-> only the parts that need it, see [Motion](#motion)).
+> only the parts that need it, see [Motion](#motion)); new in 1.0: **Input Colour Auto**, where
+> Flame converts the source and no colour space has to be picked, and the Mac build runs on
+> macOS 15 and later.
 > See [Status and roadmap](#status-and-roadmap) for what is not built yet.
 
 ## How long does it take?
@@ -204,8 +206,8 @@ installed later, per user, from inside Flame (see [Setup](#setup)).
 3. Run the installer with sudo (it writes to Flame's OFX folder):
 
    ```
-   tar xzf LTXAlphaGen-0.2.1-rocky9.tar.gz     # or ...-macos-arm64.tar.gz
-   cd LTXAlphaGen-0.2.1
+   tar xzf LTXAlphaGen-1.0.0-rocky9.tar.gz     # or ...-macos-arm64.tar.gz
+   cd LTXAlphaGen-1.0.0
    sudo ./install.sh
    ```
 
