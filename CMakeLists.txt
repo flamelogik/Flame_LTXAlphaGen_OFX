@@ -66,7 +66,8 @@ else()
 endif()
 
 # Pure logic, shared with the unit tests.
-add_library(ltxag_core STATIC ofx/src/chunk_plan.cpp ofx/src/vram_estimate.cpp ofx/src/roi.cpp ofx/src/motion.cpp)
+add_library(ltxag_core STATIC ofx/src/chunk_plan.cpp ofx/src/vram_estimate.cpp ofx/src/roi.cpp ofx/src/motion.cpp
+  ofx/src/prep_status.cpp)
 target_include_directories(ltxag_core PUBLIC ofx/src)
 
 add_library(${BUNDLE_NAME} MODULE
@@ -127,6 +128,7 @@ add_custom_target(bundle_resources ALL
           ${BUNDLE_DIR}/Contents/Resources/worker/ltxag_worker
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/worker/dummy_worker.py
           ${CMAKE_SOURCE_DIR}/worker/job.py ${CMAKE_SOURCE_DIR}/worker/ltx_worker.py
+          ${CMAKE_SOURCE_DIR}/worker/prep_window.py
           ${BUNDLE_DIR}/Contents/Resources/worker/
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/helper
           ${BUNDLE_DIR}/Contents/Resources/helper
@@ -176,6 +178,10 @@ add_test(NAME vram_estimate COMMAND test_vram_estimate)
 add_executable(test_motion ofx/tests/test_motion.cpp)
 target_link_libraries(test_motion PRIVATE ltxag_core)
 add_test(NAME motion COMMAND test_motion)
+
+add_executable(test_prep_status ofx/tests/test_prep_status.cpp)
+target_link_libraries(test_prep_status PRIVATE ltxag_core)
+add_test(NAME prep_status COMMAND test_prep_status)
 
 # System test host (systest/README.md): loads the bundle like Flame and runs end-to-end
 # scenarios. Not a ctest: it needs the isolated HOME and fake windows of systest/run_systest.sh.

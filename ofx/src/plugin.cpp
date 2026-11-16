@@ -44,6 +44,7 @@
 #include "ofxsImageEffect.h"
 #include "ofxsSupportPrivate.h"
 #include "platform.h"
+#include "prep_status.h"
 #include "process.h"
 #include "roi.h"
 #include "transport.h"
@@ -755,6 +756,22 @@ class AlphaGenEffect : public OFX::ImageEffect {
     }
   }
 
+  // Decision 79: progress in the preparing window; false once its Cancel was pressed.
+  bool prepFrame(int pass, int done, int n, std::chrono::steady_clock::time_point t0) {
+    if (!prep_) return true;
+    if (prep_->cancelled()) return false;
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const PrepLine l = prepFrameLine(pass, done, n, done ? sec / done : 0.0);
+    prep_->set(l.frac, l.text);
+    return true;
+  }
+
+  void prepCancelled() {
+    LOGI("process: cancelled in the preparing window");
+    if (prep_) prep_->close();
+    setIfChanged(status_, "Cancelled");
+  }
+
   // Scans the source's alpha over the whole clip (main thread, like the staging fetch). If the
   // alpha is opaque in every frame there is no ROI and the model sees the whole frame; else the
   // crop box is the union of the matte, grown by the margin (roi.h).
@@ -766,7 +783,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
     out.valid = true;
     out.box = {0, 0, W, H};
     RoiScan scan;
+    const auto t0 = std::chrono::steady_clock::now();
     for (int f = 0; f < n; ++f) {
+      if (!prepFrame(0, f, n, t0)) return false;  // Cancel: err stays empty
       std::unique_ptr<OFX::Image> img;
       try {
         img.reset(src_->fetchImage(double(first + f)));
@@ -1001,6 +1020,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
   }
 
   void error(const std::string& msg) {
+    if (prep_) prep_->close();  // the preparing window must not stay up behind the message (79)
     LOGW("error shown to user: %s", msg.c_str());
     sendMessage(OFX::Message::eMessageError, "", msg);
   }
@@ -1092,6 +1112,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
                      "badly. A smaller Chunk Size needs less."  // Metal over-commit swaps (devices.py)
                    : "still work; if not, the job stops with an out-of-memory error and Flame is not affected.") +
              (!kMps && prec == 0 ? " fp8 needs about 17 GB less." : "") + "\n\nProcess anyway?";
+      if (prep_) prep_->set(0.5, "GPU memory warning: answer the question in Flame", true);
       const OFX::Message::MessageReplyEnum reply = sendMessage(OFX::Message::eMessageQuestion, "", msg);
       LOGI("preflight: warning shown, reply %d (0 OK, 1 Yes, 2 No, 3 Failed)", int(reply));
       if (reply == OFX::Message::eMessageReplyNo) return false;
@@ -1148,11 +1169,37 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const int n = int(std::lround(r.max)) - first + 1;
     const OfxRectD rod = src_->getRegionOfDefinition(time);
     const int fullW = int(std::lround(rod.x2 - rod.x1)), fullH = int(std::lround(rod.y2 - rod.y1));
+    // job.py needs numpy: the system python3 has it on Rocky 9 but not on macOS, where the job
+    // runs under the LTX runtime's own Python (decision 65; Setup is stdlib-only and keeps
+    // pythonPath()).
+#ifdef __APPLE__
+    const std::string jobPython = ltxPython.empty() ? pythonPath() : ltxPython;
+#else
+    const std::string jobPython = pythonPath();
+#endif
+    std::string err;
+
+    // Decision 79: fetching the clip twice below freezes Flame for minutes at UHD; a window of
+    // its own shows the progress meanwhile and offers Cancel. It closes when this call ends.
+    PrepStatus prep(stagingDir(), int(getpid()));
+    struct PrepRef {
+      PrepStatus*& p;
+      ~PrepRef() { p = nullptr; }
+    } prepRef{prep_};
+    prep.set(0.0, "Preparing " + std::to_string(n) + " frames", true);  // before the window reads it
+    if (launchDetached({jobPython, "-I", "-B", resourcesDir() + "/worker/prep_window.py", prep.statusPath(),
+                        prep.cancelPath(), std::to_string(getpid()),
+                        "LTX Alpha Gen - preparing " + std::to_string(n) + " frames"},
+                       cleanEnvironment(), err))
+      prep_ = &prep;
+    else {
+      LOGW("process: preparing window not started: %s", err.c_str());
+      err.clear();
+    }
 
     // Decision 63: the crop. Without an alpha matte the box is the whole frame.
     RoiState roi;
-    std::string err;
-    if (!computeRoi(first, n, fullW, fullH, roi, err)) return error(err);
+    if (!computeRoi(first, n, fullW, fullH, roi, err)) return err.empty() ? prepCancelled() : error(err);
     const bool useRoi = roi.active;
     // Decision 72: no 6K. Checked on what the model sees (the crop), before anything is staged.
     if (std::max(roi.box.w, roi.box.h) >= kMaxLongSide)
@@ -1189,6 +1236,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
          kMergeNames[mergeMode]);
     std::string vramJson;
     if (!preflight(modelFrames, roi.box.w, roi.box.h, vramJson)) return;
+    if (prep_ && prep_->cancelled()) return prepCancelled();
     const std::string sig = paramSignature(&roi);
     const std::string root = cacheRoot();
     const std::string jobId = std::to_string(getpid()) + "-" + std::to_string(gJobSeq++) + "-" +
@@ -1209,6 +1257,11 @@ class AlphaGenEffect : public OFX::ImageEffect {
     std::vector<double> motion(n, 0.0);
     const auto t0 = std::chrono::steady_clock::now();
     for (int f = 0; f < n; ++f) {
+      if (!prepFrame(1, f, n, t0)) {
+        writer.close();
+        unlink(input.c_str());
+        return prepCancelled();
+      }
       std::unique_ptr<OFX::Image> img;
       try {
         img.reset(src_->fetchImage(double(first + f)));
@@ -1270,6 +1323,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       }
     }
     writer.close();
+    if (prep_) prep_->set(1.0, "Starting the job", true);
     const double sec =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     LOGI("process: staged %d frames in %.2f s (%.1f ms/frame), %.1f MB in %s", n, sec,
@@ -1352,14 +1406,6 @@ class AlphaGenEffect : public OFX::ImageEffect {
     setIfChanged(roiInfo_, useRoi ? "Crop " + std::to_string(roi.box.w) + "x" + std::to_string(roi.box.h)
                                   : std::string("None (alpha opaque)"));
     markPending(root, keys, getpid());
-    // job.py needs numpy: the system python3 has it on Rocky 9 but not on macOS, where the job
-    // runs under the LTX runtime's own Python (decision 65; Setup is stdlib-only and keeps
-    // pythonPath()).
-#ifdef __APPLE__
-    const std::string jobPython = ltxPython.empty() ? pythonPath() : ltxPython;
-#else
-    const std::string jobPython = pythonPath();
-#endif
     const bool ok = launchDetached(
         {jobPython, "-I", "-B", resourcesDir() + "/worker/job.py", manifest},
         cleanEnvironment({"LTXAG_LOG_LEVEL=" + level}), err);
@@ -1369,6 +1415,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       unlink(manifest.c_str());
       return error("Could not start processing: " + err);
     }
+    if (prep_) prep_->close();  // job.py's own progress window takes over
     {
       std::lock_guard<std::mutex> lock(jobMutex_);
       lastJobId_ = jobId;
@@ -1632,6 +1679,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
   std::string nodeId_;
   std::mutex jobMutex_;
   std::string lastJobId_;
+  PrepStatus* prep_ = nullptr;  // the preparing window while process() runs (79)
   bool inChangedParam_ = false;
   bool loggedOutput_ = false;
   bool loggedDeliveredCs_ = false;
