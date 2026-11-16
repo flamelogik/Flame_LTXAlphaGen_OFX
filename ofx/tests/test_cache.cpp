@@ -14,6 +14,7 @@
 
 #include "cache.h"
 #include "half.h"
+#include "matte_index.h"
 #include "platform.h"
 #include "transport.h"
 
@@ -101,6 +102,13 @@ int main() {
   CHECK(!anyJobActive(root, getpid()), "stale own marker blocks forever");
   clearPending(root, {"ffffffffffffffff"});
   std::ofstream(pendingPath(root, "aaaaaaaaaaaaaaaa")) << getpid();  // back for the sweep below
+  // Run indexes (decision 80): aged by the sweep like mattes, removed by Purge All.
+  mkdir(indexDir(root).c_str(), 0755);
+  const std::string oldIdx = indexPath(root, "old"), newIdx = indexPath(root, "new");
+  std::ofstream(oldIdx) << "x";
+  std::ofstream(newIdx) << "x";
+  const timespec aged[2] = {{time(nullptr) - 40 * 86400, 0}, {time(nullptr) - 40 * 86400, 0}};
+  utimensat(AT_FDCWD, oldIdx.c_str(), aged, 0);
 
   // Sweep: age limit, then LRU down to the cap.
   CacheSettings s;
@@ -120,11 +128,13 @@ int main() {
         "recent entries must survive");
   CHECK(exists(pendingPath(root, "aaaaaaaaaaaaaaaa")), "live pending removed");
   CHECK(!exists(pendingPath(root, "bbbbbbbbbbbbbbbb")), "dead pending kept");
+  CHECK(r.indexesAged == 1 && !exists(oldIdx) && exists(newIdx), "index sweep: aged=%zu", r.indexesAged);
 
   // Purges.
   CHECK(purgeKeys(root, {"c1cccccccccccccc", "nonexistent00000"}) == 1, "purgeKeys");
   CHECK(cacheBytes(root) > 0, "cacheBytes");
   CHECK(purgeAll(root) > 0 && cacheBytes(root) == 0, "purgeAll");
+  CHECK(!exists(newIdx), "purgeAll kept a run index");
 
   // Staging sweep: dead-owner files go, live-owner and live-job files stay.
   const int dead = deadPid();

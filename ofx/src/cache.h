@@ -3,6 +3,7 @@
 //   <root>/<k[0:2]>/<key>.matte   one matte: FrameFileHeader "LTXM", n=1, then w*h fp16
 //   <root>/pending/<key>          exists while a job is computing that key; holds the job pid
 //   <root>/jobs/<job id>.json     final job status (done / failed / cancelled + message)
+//   <root>/index/<run id>.idx     the plugin's per-run matte index (matte_index.h, decision 80)
 #pragma once
 
 #include <cstdint>
@@ -50,11 +51,11 @@ uint64_t cacheBytes(const std::string& root);
 uint64_t purgeAll(const std::string& root);  // returns bytes freed
 
 struct SweepResult {
-  size_t aged = 0, capped = 0, kept = 0;
+  size_t aged = 0, capped = 0, kept = 0, indexesAged = 0;
   uint64_t bytesFreed = 0, bytesKept = 0;
 };
 // Deletes mattes unused for maxAgeDays, then least-recently-used until under capGB.
-// Also clears pending markers of dead jobs.
+// Also clears pending markers of dead jobs and run indexes unused for maxAgeDays.
 SweepResult sweepCache(const CacheSettings& s);
 
 // Removes stagingDir()/ltxag_* files whose owner is gone (test 1 left a 1.5 GB orphan).
