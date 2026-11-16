@@ -372,8 +372,8 @@ struct Ctx {
   double jobTimeout() const { return opt.jobTimeout > 0 ? opt.jobTimeout : opt.tier == "full" ? 3600 : 180; }
 
   // A new node on a scene, the way Flame creates one (defaults from the user config).
-  std::unique_ptr<Instance> node(const Scene& sc) {
-    auto in = host->createInstance(sc.w, sc.h, sc.n, sc.source());
+  std::unique_ptr<Instance> node(const Scene& sc, FrameSource src = nullptr) {
+    auto in = host->createInstance(sc.w, sc.h, sc.n, src ? src : sc.source());
     if (dev) {
       in->setString("pythonPath", opt.jobPython);
       in->setBool("useDummy", opt.tier == "fast");
@@ -680,6 +680,109 @@ void testAutoHold(Ctx& c) {
   CHECK(jsonField(j.json, "chunks") == "2" && !contains(line, "@2x") && !contains(line, "@4x"),
         "slow clip: the Off plan (2 chunks at 1x): " + line);
   checkClean(*in2);
+}
+
+// Decision 80: a matte made by Process stays valid until the user reprocesses. A source that is
+// not bit-identical at render time (a denoiser upstream) still gets the matte, without a note; a
+// clearly different source gets the matte plus a footer note; a copy keeps the original's results
+// until it is processed itself, which leaves the original alone; a node processed before the run
+// index existed uses the exact source lookup as before; Purge Cache (node) then passes through.
+void testSourceChanged(Ctx& c) {
+  c.readyConfig();
+  Scene sc{320, 240, 20, AlphaMode::Opaque};
+  // mode 0: the clip; 1: +-0.001 noise, new on every fetch (never bit-identical); 2: inverted.
+  auto calls = std::make_shared<unsigned>(0);
+  auto source = [sc, calls](std::shared_ptr<int> mode) -> FrameSource {
+    return [sc, calls, mode](int f, int, int, std::vector<float>& px) {
+      sc.frame(f, px);
+      unsigned seed = 777u + (*calls)++;
+      for (size_t i = 0; i < px.size(); ++i) {
+        if (i % 4 == 3) continue;
+        seed = seed * 1103515245u + 12345u;
+        if (*mode == 1) px[i] += 0.001f * (float((seed >> 8) & 0xffff) / 32767.5f - 1.0f);
+        if (*mode == 2) px[i] = 1.0f - px[i];
+      }
+    };
+  };
+  // Largest alpha error against the dummy matte (luma) of `src` at Process time.
+  auto matteError = [&](const Rendered& r, const FrameSource& src, int f) {
+    std::vector<float> px(size_t(sc.w) * sc.h * 4);
+    src(f, sc.w, sc.h, px);
+    float worst = 0;
+    for (int y = 0; y < r.h; ++y)
+      for (int x = 0; x < r.w; ++x) worst = std::max(worst, std::fabs(r.px(x, y)[3] - luma(&px[(size_t(y) * sc.w + x) * 4])));
+    return worst;
+  };
+  const FrameSource clip = source(std::make_shared<int>(0)), inverted = source(std::make_shared<int>(2));
+  auto lumaOf = [](const float* s, int, int) { return luma(s); };
+
+  auto mode = std::make_shared<int>(0);
+  auto in = c.node(sc, source(mode));
+  c.readyConfig(in.get());
+  Job j = runJob(*in, c.jobTimeout());
+  REQUIRE(j.state == "done", "job state " + j.state + " " + j.message);
+  const std::string state = in->getString("roiState");
+  REQUIRE(std::count(state.begin(), state.end(), ';') == 2, "Process recorded its run in roiState: " + state);
+  const std::string run = state.substr(state.rfind(';') + 1);
+  const std::string index = cacheRoot(*in) + "/index/" + run + ".idx";
+  CHECK(exists(index), "run index written: " + index);
+
+  *mode = 1;  // the denoiser case: every render differs slightly from Process time
+  for (int f : {0, 9, 19}) {
+    checkMatte(in->render(f), sc, f, lumaOf, 4e-3f, "noisy source frame " + std::to_string(f));
+    CHECK(in->persistent.empty(), "noisy source: no note, footer: " + in->persistent);
+  }
+  *mode = 2;  // another picture: the matte stays, with a note
+  for (int f : {3, 12}) {
+    const Rendered r = in->render(f);
+    CHECK(r.status == kOfxStatOK, "changed source: render status " + std::to_string(r.status));
+    CHECK(matteError(r, clip, f) <= 4e-3f, "changed source: the Process matte is kept");
+    CHECK(contains(in->persistent, "Source changed since Process"), "changed source note: " + in->persistent);
+  }
+  *mode = 0;
+  in->render(3);
+  CHECK(in->persistent.empty(), "source back: the note goes: " + in->persistent);
+
+  // A copy shares every param (roiState included): the same results, with a note for its input.
+  auto copyMode = std::make_shared<int>(2);
+  auto copy = c.node(sc, source(copyMode));
+  copy->setString("roiState", state);
+  Rendered r = copy->render(5);
+  CHECK(r.status == kOfxStatOK && matteError(r, clip, 5) <= 4e-3f, "copy renders the original's matte");
+  CHECK(contains(copy->persistent, "Source changed since Process"), "copy with another input: note: " + copy->persistent);
+  j = runJob(*copy, c.jobTimeout());
+  REQUIRE(j.state == "done", "copy job " + j.state + " " + j.message);
+  CHECK(copy->getString("roiState") != state, "reprocessed copy has its own run");
+  CHECK(in->getString("roiState") == state && exists(index), "the original keeps its run and index");
+  r = copy->render(5);
+  CHECK(r.status == kOfxStatOK && matteError(r, inverted, 5) <= 4e-3f && copy->persistent.empty(),
+        "reprocessed copy: its own matte, no note");
+  r = in->render(5);
+  CHECK(r.status == kOfxStatOK && matteError(r, clip, 5) <= 4e-3f && in->persistent.empty(),
+        "original after the copy's Process: still its own matte");
+
+  // Processed before the run index existed (roiState without a run): the exact lookup, as before.
+  auto oldMode = std::make_shared<int>(0);
+  auto old = c.node(sc, source(oldMode));
+  old->setString("roiState", state.substr(0, state.rfind(';')));
+  r = old->render(5);
+  CHECK(r.status == kOfxStatOK && matteError(r, clip, 5) <= 4e-3f && old->persistent.empty(),
+        "node without an index: exact lookup hits");
+  *oldMode = 1;
+  checkFailed(old->render(5), "node without an index, source not bit-identical (as before decision 80)");
+
+  // Purge Cache (node): by the index (no frames fetched), then pass-through (decision 71).
+  in->press("purgeCache");
+  CHECK(!exists(index), "Purge Cache (node) removed the run index");
+  CHECK(contains(readFile(home() + "/.cache/ltx-alphagen/logs/ltx-alphagen.log"),
+                 "purgeNode: run " + run + " from its matte index"),
+        "purge used the index");
+  r = in->render(5);
+  CHECK(r.status == kOfxStatOK && alphaStats(r).min == 1.0f && contains(in->persistent, "Not processed"),
+        "purged node passes through: " + in->persistent);
+  r = copy->render(5);
+  CHECK(r.status == kOfxStatOK && matteError(r, inverted, 5) <= 4e-3f, "the copy's own run survives the purge");
+  checkClean(*in);
 }
 
 void testRoi(Ctx& c) {
@@ -1057,7 +1160,7 @@ int main(int argc, char** argv) {
   const std::vector<Test> fast = {
       {"describe", testDescribe},     {"create_instance", testCreate},   {"colour_migration", testColourMigration},   {"gate", testGate},
       {"not_processed", testNotProcessed}, {"process_chunks_merge_purge", testProcess},
-      {"auto_hold", testAutoHold},
+      {"auto_hold", testAutoHold},    {"source_changed", testSourceChanged},
       {"roi", testRoi},               {"cancel", testCancel},            {"failures", testFailures},
       {"too_large", testTooLarge},    {"memory_warning", testMemoryWarning}, {"save_default", testDefaults}, {"mac_fp8_refused", testMacFp8},
       {"collect_logs", testCollectLogs}};

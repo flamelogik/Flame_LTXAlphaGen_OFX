@@ -40,6 +40,7 @@
 #include "half.h"
 #include "log.h"
 #include "marker.h"
+#include "matte_index.h"
 #include "ofxColour.h"
 #include "ofxsImageEffect.h"
 #include "ofxsSupportPrivate.h"
@@ -315,6 +316,16 @@ uint64_t hashImage(const OFX::Image& img) {
   return h;
 }
 
+int componentsOf(const OFX::Image& img);
+
+// Decision 80: the forgiving signature of a source frame (matte_index.h).
+std::vector<float> imageThumb(const OFX::Image& img) {
+  const OfxRectI b = img.getBounds();
+  return sourceThumb(b.x2 - b.x1, b.y2 - b.y1, componentsOf(img), [&](int y) {
+    return static_cast<const float*>(img.getPixelAddress(b.x1, b.y1 + y));
+  });
+}
+
 std::string jsonStr(const std::string& s) {
   std::string o = "\"";
   for (char c : s) {
@@ -353,25 +364,28 @@ struct RoiState {
   RoiBox box{0, 0, 0, 0};
   bool mask = false;     // Black Out Outside ROI was on
   std::string settings;  // roiSettings() at that time; a mismatch means "reprocess"
+  std::string run;       // decision 80: the run whose matte index render uses ("" = none)
 };
 
 std::string formatRoiState(const RoiState& r) {
   char b[160];
   std::snprintf(b, sizeof b, "%d,%d,%d,%d,%d,%d;%s", int(r.active), r.box.x, r.box.y, r.box.w,
                 r.box.h, int(r.mask), r.settings.c_str());
-  return b;
+  return r.run.empty() ? std::string(b) : b + (";" + r.run);
 }
 
 RoiState parseRoiState(const std::string& v) {
   RoiState r;
   int a = 0, k = 0;
-  char set[64] = {0};
-  if (std::sscanf(v.c_str(), "%d,%d,%d,%d,%d,%d;%63s", &a, &r.box.x, &r.box.y, &r.box.w, &r.box.h,
-                  &k, set) == 7) {
+  char set[64] = {0}, run[64] = {0};
+  // Since decision 80 a ";<run id>" may follow the settings; older states have none.
+  if (std::sscanf(v.c_str(), "%d,%d,%d,%d,%d,%d;%63[^;];%63s", &a, &r.box.x, &r.box.y, &r.box.w, &r.box.h,
+                  &k, set, run) >= 7) {
     r.valid = true;
     r.active = a != 0;
     r.mask = k != 0;
     r.settings = set;
+    r.run = run;
   }
   return r;
 }
@@ -625,13 +639,39 @@ class AlphaGenEffect : public OFX::ImageEffect {
           lastOutputCs_ = outCs;
           loggedDeliveredCs_ = true;
         }
-        const std::string key = matteKey(hashImage(*src), paramSignature(nullptr, src.get()));
+        // Decision 80: a node with a run index takes the matte its last Process made for this
+        // frame, whatever the source pixels are now (a denoiser upstream need not repeat them
+        // bit for bit); a changed source only adds a note. Without an index (processed before
+        // it existed), or with other settings than at Process, the exact key decides, as before.
+        const std::string sig = paramSignature(nullptr, src.get());
+        const MatteIndex* idx = runIndex();
+        if (idx && idx->sig != sig) idx = nullptr;
+        std::string key;
+        int frame = -1;
+        if (!idx) {
+          key = matteKey(hashImage(*src), sig);
+        } else {
+          frame = int(std::lround(args.time)) - idx->first;
+          if (frame >= 0 && frame < idx->count()) key = idx->keys[size_t(frame)];
+        }
         std::vector<uint16_t> half;
-        if (readMatte(cacheRoot(), key, w, h, half)) {
+        double diff = -1.0;
+        if (!key.empty() && readMatte(cacheRoot(), key, w, h, half)) {
           matte.resize(half.size());
           halfToFloat(half.data(), matte.data(), matte.size());
           applyRoiLimit(*src, matte, w, h);
-        } else if (isPending(cacheRoot(), key)) {
+          if (idx) {
+            diff = thumbDifference(idx->thumb(frame), imageThumb(*src).data());
+            if (diff > kSourceChangedThreshold) {
+              message = "Source changed since Process: the matte may not fit. Press Process to refresh.";
+              if (changedLoggedRun_ != indexPath_) {
+                LOGW("render t=%g: source differs from Process (difference %.4f > %.4f): matte kept, "
+                     "footer note; logged once per run", args.time, diff, kSourceChangedThreshold);
+                changedLoggedRun_ = indexPath_;
+              }
+            }
+          }
+        } else if (!key.empty() && isPending(cacheRoot(), key)) {
           message = "Processing: this frame is not ready yet.";
           caption = "PROCESSING";
         } else if (!processedBefore()) {
@@ -657,8 +697,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
             caption = "MATTE MISSING";
           }
         }
-        LOGD("render t=%g key=%s %s", args.time, key.c_str(),
-             matte.empty() ? caption.c_str() : "cache hit");
+        LOGD("render t=%g key=%s %s%s source difference %.4f", args.time, key.c_str(),
+             matte.empty() ? caption.c_str() : "cache hit", idx ? " (run index)" : "", diff);
       }
     }
 
@@ -721,7 +761,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       }
     }
     try {
-      if (caption.empty())
+      if (message.empty())  // a hit with a changed source has a message but no caption (80)
         clearPersistentMessage();
       else
         setPersistentMessage(failRender ? OFX::Message::eMessageError : OFX::Message::eMessageWarning,
@@ -984,6 +1024,34 @@ class AlphaGenEffect : public OFX::ImageEffect {
     return !v.empty();
   }
 
+  // Decision 80: the matte index of this node's last Process (its run id is in roiState, so a
+  // copy shares it until it is processed itself), or null: none recorded (processed before the
+  // index existed), removed (Purge, sweep) or unreadable (the exact key decides then). Loaded once
+  // per run and kept; render calls this on every frame, so a missing file is checked each time.
+  const MatteIndex* runIndex() {
+    std::string v;
+    roiState_->getValue(v);
+    const std::string run = parseRoiState(v).run;
+    const std::string path = run.empty() ? std::string() : indexPath(cacheRoot(), run);
+    if (path.empty() || access(path.c_str(), F_OK) != 0) {
+      index_.reset();
+      indexPath_.clear();
+      return nullptr;
+    }
+    if (path != indexPath_) {
+      indexPath_ = path;  // a bad file is tried once per run
+      index_.reset(new MatteIndex);
+      if (readMatteIndex(path, *index_)) {
+        LOGI("matte index of run %s: %d frames from t=%d, %dx%d, params %s", run.c_str(), index_->count(),
+             index_->first, index_->width, index_->height, index_->sig.c_str());
+      } else {
+        LOGW("matte index %s unreadable: exact source lookup instead", path.c_str());
+        index_.reset();
+      }
+    }
+    return index_.get();
+  }
+
   std::string lastJobStatus() {
     std::string id;
     {
@@ -1192,6 +1260,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     std::unique_ptr<MotionAnalyzer> analyzer;  // Auto Frame Hold (75)
     if (hold == 0) analyzer.reset(new MotionAnalyzer(cw, ch));
     std::vector<double> motion(n, 0.0);
+    std::vector<float> thumbs;  // the run's matte index (80)
     const auto t0 = std::chrono::steady_clock::now();
     for (int f = 0; f < n; ++f) {
       std::unique_ptr<OFX::Image> img;
@@ -1248,6 +1317,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
       }
       if (analyzer) motion[f] = analyzer->endFrame();
       keys[f] = matteKey(hashImage(*img), sig);
+      const std::vector<float> thumb = imageThumb(*img);
+      thumbs.insert(thumbs.end(), thumb.begin(), thumb.end());
       if (!writer.writeFrame(frame.data(), err)) {
         writer.close();
         unlink(input.c_str());
@@ -1333,6 +1404,16 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const std::string level = logLevel() == LogLevel::Debug ? "debug" : "info";
     // Before the launch: the render Flame triggers right after this button press must already
     // see PROCESSING (test 2: it raced job.py's own markers and showed NOT PROCESSED).
+    // Decision 80: the run's matte index; its id goes into roiState (without one render uses the
+    // exact key, as before 80, so a failed write only loses the tolerance).
+    MatteIndex index;
+    index.first = first, index.width = w, index.height = h, index.sig = sig, index.keys = keys;
+    index.thumbs.swap(thumbs);
+    std::string indexErr;
+    if (writeMatteIndex(indexPath(root, jobId), index, indexErr))
+      roi.run = jobId;
+    else
+      LOGW("process: matte index not written (%s): render will need the exact source", indexErr.c_str());
     setIfChanged(roiState_, formatRoiState(roi));  // render keys on it from now on
     setIfChanged(roiInfo_, useRoi ? "Crop " + std::to_string(roi.box.w) + "x" + std::to_string(roi.box.h)
                                   : std::string("None (alpha opaque)"));
@@ -1352,6 +1433,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       clearPending(root, keys);
       unlink(input.c_str());
       unlink(manifest.c_str());
+      unlink(indexPath(root, jobId).c_str());
       return error("Could not start processing: " + err);
     }
     {
@@ -1465,14 +1547,27 @@ class AlphaGenEffect : public OFX::ImageEffect {
   }
 
   void purgeNode() {
-    const OfxRangeD r = src_->getFrameRange();
-    const std::string sig = paramSignature();
+    const std::string root = cacheRoot();
     std::vector<std::string> keys;
-    for (int t = int(std::lround(r.min)); t <= int(std::lround(r.max)); ++t) {
-      std::unique_ptr<OFX::Image> img(src_->fetchImage(double(t)));
-      if (img) keys.push_back(matteKey(hashImage(*img), sig));
+    // Decision 80: with a run index, its keys (no source frames fetched: that took ~100 s on a
+    // UHD clip). A copy sharing the run loses the mattes too (as before, for the same source).
+    std::string v;
+    roiState_->getValue(v);
+    const std::string run = parseRoiState(v).run;
+    MatteIndex index;
+    if (!run.empty() && readMatteIndex(indexPath(root, run), index)) {
+      keys = index.keys;
+      unlink(indexPath(root, run).c_str());
+      LOGI("purgeNode: run %s from its matte index", run.c_str());
+    } else {
+      const OfxRangeD r = src_->getFrameRange();
+      const std::string sig = paramSignature();
+      for (int t = int(std::lround(r.min)); t <= int(std::lround(r.max)); ++t) {
+        std::unique_ptr<OFX::Image> img(src_->fetchImage(double(t)));
+        if (img) keys.push_back(matteKey(hashImage(*img), sig));
+      }
     }
-    const size_t n = purgeKeys(cacheRoot(), keys);
+    const size_t n = purgeKeys(root, keys);
     LOGI("purgeNode: %zu of %zu frames had cached mattes, removed", n, keys.size());
     setIfChanged(roiState_, "");  // back to never processed: pass-through (decision 71)
     setIfChanged(status_, "Cache purged: " + std::to_string(n) + " frames");
@@ -1626,6 +1721,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
   std::thread setupWatcher_;
   std::atomic<bool> setupStop_{false};
   bool gateWasClosed_ = false;  // render: refresh the Setup UI once Setup has completed
+  std::unique_ptr<MatteIndex> index_;  // runIndex(): the loaded index of indexPath_ (80)
+  std::string indexPath_;
+  std::string changedLoggedRun_;  // the index whose changed source was logged at WARN
   std::atomic<bool> stopFlag_{false};
 };
 
@@ -1681,8 +1779,9 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     const size_t staged = sweepStaleStaging();
     const SweepResult sw = sweepCache(cacheSettings(loadUserConfig()));
     LOGI("sweep: %zu stale staging file(s); cache aged %zu, capped %zu, kept %zu (%.1f MB), "
-         "freed %.1f MB",
-         staged, sw.aged, sw.capped, sw.kept, sw.bytesKept / 1048576.0, sw.bytesFreed / 1048576.0);
+         "freed %.1f MB; run indexes aged %zu",
+         staged, sw.aged, sw.capped, sw.kept, sw.bytesKept / 1048576.0, sw.bytesFreed / 1048576.0,
+         sw.indexesAged);
     desc.setLabels(kPluginLabel, kPluginLabel, kPluginLabel);
     desc.setPluginGrouping("LTX");
     desc.addSupportedContext(OFX::eContextFilter);
