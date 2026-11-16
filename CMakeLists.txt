@@ -77,6 +77,7 @@ add_library(${BUNDLE_NAME} MODULE
   ofx/src/transport.cpp
   ofx/src/process.cpp
   ofx/src/cache.cpp
+  ofx/src/matte_index.cpp
   ofx/src/marker.cpp
   ofx/src/env_info.cpp)
 target_link_libraries(${BUNDLE_NAME} PRIVATE ofx_support ltxag_core ${LTXAG_PLATFORM_LIBS} pthread)
@@ -159,6 +160,10 @@ add_executable(test_cache ofx/tests/test_cache.cpp ofx/src/cache.cpp ofx/src/tra
 target_link_libraries(test_cache PRIVATE ${LTXAG_PLATFORM_LIBS})
 target_include_directories(test_cache PRIVATE ofx/src)
 add_test(NAME cache COMMAND test_cache)
+
+add_executable(test_matte_index ofx/tests/test_matte_index.cpp ofx/src/matte_index.cpp)
+target_include_directories(test_matte_index PRIVATE ofx/src)
+add_test(NAME matte_index COMMAND test_matte_index)
 
 add_executable(test_roi ofx/tests/test_roi.cpp)
 target_link_libraries(test_roi PRIVATE ltxag_core)

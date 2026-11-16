@@ -14,6 +14,7 @@
 #include <ctime>
 #include <fstream>
 
+#include "matte_index.h"
 #include "platform.h"
 #include "transport.h"
 
@@ -135,6 +136,11 @@ uint64_t purgeAll(const std::string& root) {
         freed += uint64_t(st.st_size);
     }
   }
+  for (const auto& f : listDir(indexDir(root))) {  // run indexes (decision 80)
+    const std::string p = indexDir(root) + "/" + f;
+    struct stat st {};
+    if (stat(p.c_str(), &st) == 0 && unlink(p.c_str()) == 0) freed += uint64_t(st.st_size);
+  }
   return freed;
 }
 
@@ -182,6 +188,13 @@ SweepResult sweepCache(const CacheSettings& s) {
   }
   r.bytesKept = total;
   r.kept = entries.size() - r.capped;
+  // Run indexes (decision 80) unused for maxAgeDays; small, so not part of the size cap.
+  for (const auto& f : listDir(indexDir(s.root))) {
+    const std::string p = indexDir(s.root) + "/" + f;
+    struct stat st {};
+    if (s.maxAgeDays > 0 && stat(p.c_str(), &st) == 0 && now - st.st_mtime > maxAge && unlink(p.c_str()) == 0)
+      ++r.indexesAged;
+  }
   // Pending markers of jobs that no longer run.
   for (const auto& f : listDir(s.root + "/pending")) {
     const std::string p = s.root + "/pending/" + f;
