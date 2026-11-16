@@ -206,8 +206,8 @@ installed later, per user, from inside Flame (see [Setup](#setup)).
 3. Run the installer with sudo (it writes to Flame's OFX folder):
 
    ```
-   tar xzf LTXAlphaGen-1.0.0-rocky9.tar.gz     # or ...-macos-arm64.tar.gz
-   cd LTXAlphaGen-1.0.0
+   tar xzf LTXAlphaGen-1.0.1-rocky9.tar.gz     # or ...-macos-arm64.tar.gz
+   cd LTXAlphaGen-1.0.1
    sudo ./install.sh
    ```
 

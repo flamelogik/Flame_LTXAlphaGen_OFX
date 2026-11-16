@@ -18,9 +18,10 @@ option(LTXAG_DEV_BUILD "Prototype/test build: Prototype page, bypassable licence
 # 0.1.5 = fp16 transformer on Macs where it is faster, system test before releases;
 # 0.2.0 = MATTE MISSING for processed nodes (71), 6K refused with advice (72), install.sh messages;
 # 0.2.1 = Frame Hold for fast motion (74) with Auto per-chunk holds from measured motion (75);
-# 1.0.0 = Input Colour Auto / Bypass (76), first release by CI (77), macOS 15 minimum).
+# 1.0.0 = Input Colour Auto / Bypass (76), first release by CI (77), macOS 15 minimum;
+# 1.0.1 = one Process at a time (78), preparing window (79), per-run matte index (80): fixes #1).
 # Also the OFX plugin version (major.minor) and the release package name.
-set(LTXAG_VERSION "1.0.0")
+set(LTXAG_VERSION "1.0.1")
 string(REPLACE "." ";" LTXAG_VERSION_PARTS "${LTXAG_VERSION}")
 list(GET LTXAG_VERSION_PARTS 0 LTXAG_VERSION_MAJOR)
 list(GET LTXAG_VERSION_PARTS 1 LTXAG_VERSION_MINOR)
