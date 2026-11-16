@@ -742,7 +742,7 @@ void testCancel(Ctx& c) {
   bool asked = false;
   double tCancel = 0;
   Job j = runJob(*in, c.jobTimeout(), [&](Job&) {
-    if (!asked && contains(fakeProgress(), "#")) {  // the window shows progress: the job runs
+    if (!asked && contains(fakeProgress(), "elapsed")) {  // job.py's window (not the preparing one, 79): the job runs
       requestCancel();
       asked = true;
       tCancel = now();
@@ -834,6 +834,88 @@ void testMemoryWarning(Ctx& c) {
   CHECK(j.state == "done", "no answer: the job runs: " + j.state);
   CHECK(contains(in->persistent, "may not fit"), "no answer: footer warning (decision 56): " + in->persistent);
   in->setDouble("simNeedGB", 0.0);
+}
+
+// Decision 79: Process opens a "preparing" window before it fetches the clip, and its Cancel stops
+// Process cleanly, during the fetch or while the VRAM question is up (that part needs GPU memory info).
+void testPrepWindow(Ctx& c) {
+  c.readyConfig();
+  Scene sc{320, 240, 9, AlphaMode::Opaque};
+  auto in = c.node(sc);
+  c.readyConfig(in.get());
+  const std::string prepBase = ltxag::stagingDir() + "/ltxag_" + std::to_string(getpid()) + "_prep";
+  Job j = runJob(*in, c.jobTimeout());
+  REQUIRE(j.state == "done", "job state " + j.state + " " + j.message);
+  double t0 = now();
+  while (!contains(readFile(fakeUiDir() + "/windows.log"), "preparing 9 frames") && now() - t0 < 10) sleepMs(100);
+  CHECK(contains(readFile(fakeUiDir() + "/windows.log"), "LTX Alpha Gen - preparing 9 frames"),
+        "a preparing window was opened");
+  CHECK(!exists(prepBase + ".txt") && !exists(prepBase + ".cancel"), "no prep files left after a launch");
+
+  // Cancel while Process is fetching frames (an HD clip takes seconds here): pressed from another
+  // thread as soon as the window shows a frame count.
+  Scene hd{1920, 1080, 145, AlphaMode::Opaque};
+  auto big = c.node(hd);
+  c.readyConfig(big.get());
+  clearFakeUi();
+  std::string seen;
+  std::thread presser([&] {
+    const double ts = now();
+    while (!contains(fakeProgress(), "frame ") && !contains(fakeProgress(), "Reading frames") && now() - ts < 30)
+      sleepMs(20);
+    seen = fakeProgress();
+    requestCancel();
+  });
+  const double tp = now();
+  const auto before = jobFiles(*big);
+  const size_t m2 = big->messages.size();
+  big->press("process");
+  const double took = now() - tp;
+  presser.join();
+  bool errors2 = false;
+  for (size_t i = m2; i < big->messages.size(); ++i) errors2 |= big->messages[i].type == kOfxMessageError;
+  note("Process returned after " + std::to_string(took).substr(0, 4) + " s; window showed: " +
+       seen.substr(seen.rfind("# ") == std::string::npos ? 0 : seen.rfind("# ")));
+  CHECK(contains(seen, "/145"), "the window counted frames: " + seen);
+  CHECK(big->getString("status") == "Cancelled", "status param: " + big->getString("status"));
+  CHECK(!errors2, "Cancel: no error message");
+  sleepMs(1000);
+  CHECK(jobFiles(*big) == before, "Cancel: no job launched");
+  CHECK(!exists(prepBase + ".txt") && !exists(prepBase + ".cancel"), "no prep files left");
+  checkClean(*big);
+
+  in->setDouble("simNeedGB", 100000.0);
+  in->replies = {Reply::Yes};
+  bool cancelSeen = false;
+  std::string shown;
+  in->onQuestion = [&] {
+    // The window shows the question hint, then the user presses its Cancel.
+    double ts = now();
+    while (!contains(fakeProgress(), "answer the question") && now() - ts < 10) sleepMs(50);
+    shown = fakeProgress();
+    requestCancel();
+    while (!(cancelSeen = exists(prepBase + ".cancel")) && now() - ts < 20) sleepMs(50);
+  };
+  const size_t m = in->messages.size();
+  const auto jobsBefore = jobFiles(*in);
+  clearFakeUi();
+  in->press("process");  // returns once Process has ended: no job to wait for after a Cancel
+  in->onQuestion = nullptr;
+  in->setDouble("simNeedGB", 0.0);
+  bool asked = false, errors = false;
+  for (size_t i = m; i < in->messages.size(); ++i) {
+    asked |= in->messages[i].type == kOfxMessageQuestion;
+    errors |= in->messages[i].type == kOfxMessageError;
+  }
+  if (!asked) throw Skip("no GPU memory information on this machine: no question to cancel during");
+  CHECK(contains(shown, "# GPU memory warning: answer the question in Flame"), "the window named the question: " + shown);
+  CHECK(cancelSeen, "the window reported Cancel");
+  sleepMs(1000);  // a job, had one been launched, writes its status file at once
+  CHECK(jobFiles(*in) == jobsBefore, "Cancel: no job launched");
+  CHECK(!errors, "Cancel: no error message");
+  CHECK(in->getString("status") == "Cancelled", "status param: " + in->getString("status"));
+  CHECK(!exists(prepBase + ".txt") && !exists(prepBase + ".cancel"), "no prep files left after Cancel");
+  checkClean(*in);
 }
 
 void testDefaults(Ctx& c) {
@@ -1059,7 +1141,8 @@ int main(int argc, char** argv) {
       {"not_processed", testNotProcessed}, {"process_chunks_merge_purge", testProcess},
       {"auto_hold", testAutoHold},
       {"roi", testRoi},               {"cancel", testCancel},            {"failures", testFailures},
-      {"too_large", testTooLarge},    {"memory_warning", testMemoryWarning}, {"save_default", testDefaults}, {"mac_fp8_refused", testMacFp8},
+      {"too_large", testTooLarge},    {"memory_warning", testMemoryWarning}, {"prep_window", testPrepWindow},
+      {"save_default", testDefaults}, {"mac_fp8_refused", testMacFp8},
       {"collect_logs", testCollectLogs}};
   const std::vector<Test> full = {
       {"describe", testDescribe}, {"release_gate", testFullGate}, {"real_matte", testRealMatte},

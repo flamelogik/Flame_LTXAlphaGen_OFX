@@ -127,6 +127,7 @@ class Instance {
   std::string persistent;         // the current footer message ("" = none)
   std::vector<Reply> replies;     // answers to the next questions; empty -> defaultReply
   Reply defaultReply = Reply::None;
+  std::function<void()> onQuestion;  // runs while a question is "on screen", before the reply
   int echoes = 0;                 // plugin setValues reported back as instanceChanged
   int maxEchoDepth = 0;
 
