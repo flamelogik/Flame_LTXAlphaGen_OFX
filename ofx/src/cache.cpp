@@ -89,6 +89,25 @@ bool isPending(const std::string& root, const std::string& key) {
   return pidAlive(readPid(p));
 }
 
+bool anyJobActive(const std::string& root, int selfPid, int graceSec) {
+  DIR* d = opendir((root + "/pending").c_str());
+  if (!d) return false;
+  bool active = false;
+  while (!active) {
+    const dirent* e = readdir(d);
+    if (!e) break;
+    if (e->d_name[0] == '.') continue;
+    const std::string p = root + "/pending/" + e->d_name;
+    const int pid = readPid(p);
+    if (!pidAlive(pid)) continue;
+    struct stat st {};
+    if (pid == selfPid && (stat(p.c_str(), &st) != 0 || time(nullptr) - st.st_mtime > graceSec)) continue;
+    active = true;
+  }
+  closedir(d);
+  return active;
+}
+
 void markPending(const std::string& root, const std::vector<std::string>& keys, int pid) {
   mkdir((root + "/pending").c_str(), 0755);
   const std::string text = std::to_string(pid);

@@ -34,6 +34,11 @@ bool readMatte(const std::string& root, const std::string& key, uint32_t w, uint
 // True while a live job holds the key's pending marker.
 bool isPending(const std::string& root, const std::string& key);
 
+// True while any job (this node or another) is live: a pending marker whose pid is alive.
+// Markers the plugin wrote with its own pid (`selfPid`) count only for `graceSec` seconds, so a
+// job.py that never started cannot block Process until Flame restarts.
+bool anyJobActive(const std::string& root, int selfPid, int graceSec = 120);
+
 // Written by the plugin just before it launches a job (with Flame's pid), so a render that
 // arrives before job.py has marked the keys still shows PROCESSING; job.py then rewrites them
 // with its own pid and removes them at the end. clearPending undoes it if the launch fails.

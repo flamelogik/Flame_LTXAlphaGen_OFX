@@ -86,6 +86,22 @@ int main() {
   clearPending(root, {"cccccccccccccccc", "dddddddddddddddd"});
   CHECK(!isPending(root, "cccccccccccccccc"), "clearPending left a marker");
 
+  // anyJobActive: a live job's marker blocks; a dead one does not; our own stale marker lapses.
+  CHECK(anyJobActive(root, getpid()), "live job not active");  // 'aaaa…' holds our pid, fresh
+  clearPending(root, {"aaaaaaaaaaaaaaaa"});
+  CHECK(!anyJobActive(root, getpid()), "dead marker blocks Process");
+  std::ofstream(pendingPath(root, "eeeeeeeeeeeeeeee")) << getppid();  // another live process
+  CHECK(anyJobActive(root, getpid()), "other live pid does not block");
+  CHECK(anyJobActive(root, getpid(), 0) , "foreign pid must ignore the grace period");
+  clearPending(root, {"eeeeeeeeeeeeeeee"});
+  markPending(root, {"ffffffffffffffff"}, getpid());
+  CHECK(anyJobActive(root, getpid()), "fresh own marker (launch gap) not active");
+  struct timespec old[2] = {{time(nullptr) - 600, 0}, {time(nullptr) - 600, 0}};
+  utimensat(AT_FDCWD, pendingPath(root, "ffffffffffffffff").c_str(), old, 0);
+  CHECK(!anyJobActive(root, getpid()), "stale own marker blocks forever");
+  clearPending(root, {"ffffffffffffffff"});
+  std::ofstream(pendingPath(root, "aaaaaaaaaaaaaaaa")) << getpid();  // back for the sweep below
+
   // Sweep: age limit, then LRU down to the cap.
   CacheSettings s;
   s.root = root;

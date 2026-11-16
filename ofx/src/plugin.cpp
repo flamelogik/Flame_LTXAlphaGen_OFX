@@ -65,6 +65,7 @@
 #endif
 
 namespace {
+std::atomic<bool> gProcessing{false};  // a process() call is in progress (any node in this Flame)
 
 using namespace ltxag;
 
@@ -1114,7 +1115,21 @@ class AlphaGenEffect : public OFX::ImageEffect {
   }
 
   // Fetches every frame of the clip during this action and hands them to a detached job.
+  // One Process at a time, machine-wide in effect: the flag covers the whole call, including the
+  // modal VRAM question that lets Flame deliver a second click (it reached the launch twice,
+  // 2026-11-16); the pending markers cover the job after the call returns (a click queued behind
+  // the blocked UI thread arrives after it).
   void process(double time) {
+    if (gProcessing.exchange(true))
+      return error("Process is already running: wait until it has finished or press Cancel in its window.");
+    struct Release {
+      ~Release() { gProcessing = false; }
+    } release;
+    if (anyJobActive(cacheRoot(), getpid())) {
+      LOGW("process: refused, a job is already active");
+      return error("A job is already running (see its progress window). Wait until it has finished "
+                   "or press Cancel there, then press Process again.");
+    }
     if (gateClosed()) return error("Complete the Licence and Models setup first.");
     const UserConfig cfg = loadUserConfig();
     std::string modelDir;

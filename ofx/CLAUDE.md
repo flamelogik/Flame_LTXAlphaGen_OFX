@@ -63,6 +63,12 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   node); Purge Cache (node) clears it. A duplicate errors too: a copy shares every param, and a
   content record couldn't tell it from an upstream change (user chose the error). How Flame
   shows a failed render, and whether Batch Render stops: UNVERIFIED (test in Flame).
+- **78. One Process at a time** (2026-11-16, Flame test on UHD: clicks queued behind the blocked UI
+  thread, or delivered during the modal VRAM question, ran a second full `process()` while the first
+  job held the GPU; the second job hit the busy worker and died). `process()` holds a process-wide
+  flag for the whole call and refuses while `anyJobActive` (cache.h: a pending marker with a live
+  pid; the plugin's own pre-launch markers count for 120 s only). Not in the cache key.
+  UNVERIFIED in Flame; `test_cache` covers `anyJobActive`.
 - **PROCESSING race (49):** the plugin writes the frames' pending markers itself (Flame's pid)
   just before launching; job.py rewrites them with its pid. Otherwise Flame's render right after
   the button press beat job.py (~50 ms) and showed NOT PROCESSED for the whole job. The plugin's

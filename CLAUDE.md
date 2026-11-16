@@ -120,7 +120,7 @@ only, BSD, `VENDORED.txt`). Plugin id `com.janklier.ltx.alphagen`, version from 
 48 RGBA output · 56 memory warning and record · 58 matte overlay · 59 SETUP REQUIRED on both
 outputs · 62 Merge (Smooth in C++) · 63 ROI = source alpha · 64/65 C++ platform layer and macOS
 memory · 68 effective precision (fp16) · 71 processed record: pass-through or failed render ·
-74 Frame Hold param, held chunks · 75 Auto hold (motion while staging, per-chunk plan).
+74 Frame Hold param, held chunks · 75 Auto hold (motion while staging, per-chunk plan) · 78 one Process at a time.
 
 **In `worker/CLAUDE.md`:** 8/23/27/28/54 input colour (OCIO in the worker) · 9 prompt cache ·
 24 padding · 33 idle timeout · 55 resident transformer only with Unload off · 56 VRAM record
