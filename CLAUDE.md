@@ -120,7 +120,7 @@ only, BSD, `VENDORED.txt`). Plugin id `com.janklier.ltx.alphagen`, version from 
 48 RGBA output · 56 memory warning and record · 58 matte overlay · 59 SETUP REQUIRED on both
 outputs · 62 Merge (Smooth in C++) · 63 ROI = source alpha · 64/65 C++ platform layer and macOS
 memory · 68 effective precision (fp16) · 71 processed record: pass-through or failed render ·
-74 Frame Hold param, held chunks · 75 Auto hold (motion while staging, per-chunk plan) · 78 one Process at a time · 79 preparing window.
+74 Frame Hold param, held chunks · 75 Auto hold (motion while staging, per-chunk plan) · 78 one Process at a time · 79 preparing window · 80 per-run matte index.
 
 **In `worker/CLAUDE.md`:** 8/23/27/28/54 input colour (OCIO in the worker) · 9 prompt cache ·
 24 padding · 33 idle timeout · 55 resident transformer only with Unload off · 56 VRAM record
@@ -180,7 +180,7 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; no separate legal read: 
   `CMAKE_OBJCXX_FLAGS`. A CLT update that leaves an SDK newer than its `ld` (2026-10-17: CLT 26.6,
   `xcrun` picked a leftover MacOSX27.0.sdk; "unknown architecture" in its `.tbd` files): pass
   `-DCMAKE_OSX_SYSROOT=<CLT>/SDKs/MacOSX.sdk`.
-- **Tests (ctest, 10, host-free):** `chunk_plan`, `roi`, `motion`, `prep_status`, `worker_python` (padding, transport, job
+- **Tests (ctest, 11, host-free):** `chunk_plan`, `roi`, `motion`, `prep_status`, `matte_index`, `worker_python` (padding, transport, job
   incl. Tracker, VRAM CSV, refresh marker, ROI paste-back, flow merge, `test_morph`, the hook
   against a fake `flame` module, log, Setup models), `worker_roundtrip`, `cache`, `marker_log`,
   `vram_estimate`, `load_bundle`. Real model on a GPU machine: `tools/worker_smoke.py`,
