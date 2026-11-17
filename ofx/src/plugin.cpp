@@ -40,10 +40,12 @@
 #include "half.h"
 #include "log.h"
 #include "marker.h"
+#include "matte_index.h"
 #include "ofxColour.h"
 #include "ofxsImageEffect.h"
 #include "ofxsSupportPrivate.h"
 #include "platform.h"
+#include "prep_status.h"
 #include "process.h"
 #include "roi.h"
 #include "transport.h"
@@ -65,6 +67,7 @@
 #endif
 
 namespace {
+std::atomic<bool> gProcessing{false};  // a process() call is in progress (any node in this Flame)
 
 using namespace ltxag;
 
@@ -315,6 +318,16 @@ uint64_t hashImage(const OFX::Image& img) {
   return h;
 }
 
+int componentsOf(const OFX::Image& img);
+
+// Decision 80: the forgiving signature of a source frame (matte_index.h).
+std::vector<float> imageThumb(const OFX::Image& img) {
+  const OfxRectI b = img.getBounds();
+  return sourceThumb(b.x2 - b.x1, b.y2 - b.y1, componentsOf(img), [&](int y) {
+    return static_cast<const float*>(img.getPixelAddress(b.x1, b.y1 + y));
+  });
+}
+
 std::string jsonStr(const std::string& s) {
   std::string o = "\"";
   for (char c : s) {
@@ -353,25 +366,28 @@ struct RoiState {
   RoiBox box{0, 0, 0, 0};
   bool mask = false;     // Black Out Outside ROI was on
   std::string settings;  // roiSettings() at that time; a mismatch means "reprocess"
+  std::string run;       // decision 80: the run whose matte index render uses ("" = none)
 };
 
 std::string formatRoiState(const RoiState& r) {
   char b[160];
   std::snprintf(b, sizeof b, "%d,%d,%d,%d,%d,%d;%s", int(r.active), r.box.x, r.box.y, r.box.w,
                 r.box.h, int(r.mask), r.settings.c_str());
-  return b;
+  return r.run.empty() ? std::string(b) : b + (";" + r.run);
 }
 
 RoiState parseRoiState(const std::string& v) {
   RoiState r;
   int a = 0, k = 0;
-  char set[64] = {0};
-  if (std::sscanf(v.c_str(), "%d,%d,%d,%d,%d,%d;%63s", &a, &r.box.x, &r.box.y, &r.box.w, &r.box.h,
-                  &k, set) == 7) {
+  char set[64] = {0}, run[64] = {0};
+  // Since decision 80 a ";<run id>" may follow the settings; older states have none.
+  if (std::sscanf(v.c_str(), "%d,%d,%d,%d,%d,%d;%63[^;];%63s", &a, &r.box.x, &r.box.y, &r.box.w, &r.box.h,
+                  &k, set, run) >= 7) {
     r.valid = true;
     r.active = a != 0;
     r.mask = k != 0;
     r.settings = set;
+    r.run = run;
   }
   return r;
 }
@@ -625,13 +641,39 @@ class AlphaGenEffect : public OFX::ImageEffect {
           lastOutputCs_ = outCs;
           loggedDeliveredCs_ = true;
         }
-        const std::string key = matteKey(hashImage(*src), paramSignature(nullptr, src.get()));
+        // Decision 80: a node with a run index takes the matte its last Process made for this
+        // frame, whatever the source pixels are now (a denoiser upstream need not repeat them
+        // bit for bit); a changed source only adds a note. Without an index (processed before
+        // it existed), or with other settings than at Process, the exact key decides, as before.
+        const std::string sig = paramSignature(nullptr, src.get());
+        const MatteIndex* idx = runIndex();
+        if (idx && idx->sig != sig) idx = nullptr;
+        std::string key;
+        int frame = -1;
+        if (!idx) {
+          key = matteKey(hashImage(*src), sig);
+        } else {
+          frame = int(std::lround(args.time)) - idx->first;
+          if (frame >= 0 && frame < idx->count()) key = idx->keys[size_t(frame)];
+        }
         std::vector<uint16_t> half;
-        if (readMatte(cacheRoot(), key, w, h, half)) {
+        double diff = -1.0;
+        if (!key.empty() && readMatte(cacheRoot(), key, w, h, half)) {
           matte.resize(half.size());
           halfToFloat(half.data(), matte.data(), matte.size());
           applyRoiLimit(*src, matte, w, h);
-        } else if (isPending(cacheRoot(), key)) {
+          if (idx) {
+            diff = thumbDifference(idx->thumb(frame), imageThumb(*src).data());
+            if (diff > kSourceChangedThreshold) {
+              message = "Source changed since Process: the matte may not fit. Press Process to refresh.";
+              if (changedLoggedRun_ != indexPath_) {
+                LOGW("render t=%g: source differs from Process (difference %.4f > %.4f): matte kept, "
+                     "footer note; logged once per run", args.time, diff, kSourceChangedThreshold);
+                changedLoggedRun_ = indexPath_;
+              }
+            }
+          }
+        } else if (!key.empty() && isPending(cacheRoot(), key)) {
           message = "Processing: this frame is not ready yet.";
           caption = "PROCESSING";
         } else if (!processedBefore()) {
@@ -657,8 +699,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
             caption = "MATTE MISSING";
           }
         }
-        LOGD("render t=%g key=%s %s", args.time, key.c_str(),
-             matte.empty() ? caption.c_str() : "cache hit");
+        LOGD("render t=%g key=%s %s%s source difference %.4f", args.time, key.c_str(),
+             matte.empty() ? caption.c_str() : "cache hit", idx ? " (run index)" : "", diff);
       }
     }
 
@@ -721,7 +763,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       }
     }
     try {
-      if (caption.empty())
+      if (message.empty())  // a hit with a changed source has a message but no caption (80)
         clearPersistentMessage();
       else
         setPersistentMessage(failRender ? OFX::Message::eMessageError : OFX::Message::eMessageWarning,
@@ -754,6 +796,22 @@ class AlphaGenEffect : public OFX::ImageEffect {
     }
   }
 
+  // Decision 79: progress in the preparing window; false once its Cancel was pressed.
+  bool prepFrame(int pass, int done, int n, std::chrono::steady_clock::time_point t0) {
+    if (!prep_) return true;
+    if (prep_->cancelled()) return false;
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const PrepLine l = prepFrameLine(pass, done, n, done ? sec / done : 0.0);
+    prep_->set(l.frac, l.text);
+    return true;
+  }
+
+  void prepCancelled() {
+    LOGI("process: cancelled in the preparing window");
+    if (prep_) prep_->close();
+    setIfChanged(status_, "Cancelled");
+  }
+
   // Scans the source's alpha over the whole clip (main thread, like the staging fetch). If the
   // alpha is opaque in every frame there is no ROI and the model sees the whole frame; else the
   // crop box is the union of the matte, grown by the margin (roi.h).
@@ -765,7 +823,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
     out.valid = true;
     out.box = {0, 0, W, H};
     RoiScan scan;
+    const auto t0 = std::chrono::steady_clock::now();
     for (int f = 0; f < n; ++f) {
+      if (!prepFrame(0, f, n, t0)) return false;  // Cancel: err stays empty
       std::unique_ptr<OFX::Image> img;
       try {
         img.reset(src_->fetchImage(double(first + f)));
@@ -984,6 +1044,34 @@ class AlphaGenEffect : public OFX::ImageEffect {
     return !v.empty();
   }
 
+  // Decision 80: the matte index of this node's last Process (its run id is in roiState, so a
+  // copy shares it until it is processed itself), or null: none recorded (processed before the
+  // index existed), removed (Purge, sweep) or unreadable (the exact key decides then). Loaded once
+  // per run and kept; render calls this on every frame, so a missing file is checked each time.
+  const MatteIndex* runIndex() {
+    std::string v;
+    roiState_->getValue(v);
+    const std::string run = parseRoiState(v).run;
+    const std::string path = run.empty() ? std::string() : indexPath(cacheRoot(), run);
+    if (path.empty() || access(path.c_str(), F_OK) != 0) {
+      index_.reset();
+      indexPath_.clear();
+      return nullptr;
+    }
+    if (path != indexPath_) {
+      indexPath_ = path;  // a bad file is tried once per run
+      index_.reset(new MatteIndex);
+      if (readMatteIndex(path, *index_)) {
+        LOGI("matte index of run %s: %d frames from t=%d, %dx%d, params %s", run.c_str(), index_->count(),
+             index_->first, index_->width, index_->height, index_->sig.c_str());
+      } else {
+        LOGW("matte index %s unreadable: exact source lookup instead", path.c_str());
+        index_.reset();
+      }
+    }
+    return index_.get();
+  }
+
   std::string lastJobStatus() {
     std::string id;
     {
@@ -1000,6 +1088,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
   }
 
   void error(const std::string& msg) {
+    if (prep_) prep_->close();  // the preparing window must not stay up behind the message (79)
     LOGW("error shown to user: %s", msg.c_str());
     sendMessage(OFX::Message::eMessageError, "", msg);
   }
@@ -1091,6 +1180,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
                      "badly. A smaller Chunk Size needs less."  // Metal over-commit swaps (devices.py)
                    : "still work; if not, the job stops with an out-of-memory error and Flame is not affected.") +
              (!kMps && prec == 0 ? " fp8 needs about 17 GB less." : "") + "\n\nProcess anyway?";
+      if (prep_) prep_->set(0.5, "GPU memory warning: answer the question in Flame", true);
       const OFX::Message::MessageReplyEnum reply = sendMessage(OFX::Message::eMessageQuestion, "", msg);
       LOGI("preflight: warning shown, reply %d (0 OK, 1 Yes, 2 No, 3 Failed)", int(reply));
       if (reply == OFX::Message::eMessageReplyNo) return false;
@@ -1114,7 +1204,21 @@ class AlphaGenEffect : public OFX::ImageEffect {
   }
 
   // Fetches every frame of the clip during this action and hands them to a detached job.
+  // One Process at a time, machine-wide in effect: the flag covers the whole call, including the
+  // modal VRAM question that lets Flame deliver a second click (it reached the launch twice,
+  // 2026-11-16); the pending markers cover the job after the call returns (a click queued behind
+  // the blocked UI thread arrives after it).
   void process(double time) {
+    if (gProcessing.exchange(true))
+      return error("Process is already running: wait until it has finished or press Cancel in its window.");
+    struct Release {
+      ~Release() { gProcessing = false; }
+    } release;
+    if (anyJobActive(cacheRoot(), getpid())) {
+      LOGW("process: refused, a job is already active");
+      return error("A job is already running (see its progress window). Wait until it has finished "
+                   "or press Cancel there, then press Process again.");
+    }
     if (gateClosed()) return error("Complete the Licence and Models setup first.");
     const UserConfig cfg = loadUserConfig();
     std::string modelDir;
@@ -1133,11 +1237,37 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const int n = int(std::lround(r.max)) - first + 1;
     const OfxRectD rod = src_->getRegionOfDefinition(time);
     const int fullW = int(std::lround(rod.x2 - rod.x1)), fullH = int(std::lround(rod.y2 - rod.y1));
+    // job.py needs numpy: the system python3 has it on Rocky 9 but not on macOS, where the job
+    // runs under the LTX runtime's own Python (decision 65; Setup is stdlib-only and keeps
+    // pythonPath()).
+#ifdef __APPLE__
+    const std::string jobPython = ltxPython.empty() ? pythonPath() : ltxPython;
+#else
+    const std::string jobPython = pythonPath();
+#endif
+    std::string err;
+
+    // Decision 79: fetching the clip twice below freezes Flame for minutes at UHD; a window of
+    // its own shows the progress meanwhile and offers Cancel. It closes when this call ends.
+    PrepStatus prep(stagingDir(), int(getpid()));
+    struct PrepRef {
+      PrepStatus*& p;
+      ~PrepRef() { p = nullptr; }
+    } prepRef{prep_};
+    prep.set(0.0, "Preparing " + std::to_string(n) + " frames", true);  // before the window reads it
+    if (launchDetached({jobPython, "-I", "-B", resourcesDir() + "/worker/prep_window.py", prep.statusPath(),
+                        prep.cancelPath(), std::to_string(getpid()),
+                        "LTX Alpha Gen - preparing " + std::to_string(n) + " frames"},
+                       cleanEnvironment(), err))
+      prep_ = &prep;
+    else {
+      LOGW("process: preparing window not started: %s", err.c_str());
+      err.clear();
+    }
 
     // Decision 63: the crop. Without an alpha matte the box is the whole frame.
     RoiState roi;
-    std::string err;
-    if (!computeRoi(first, n, fullW, fullH, roi, err)) return error(err);
+    if (!computeRoi(first, n, fullW, fullH, roi, err)) return err.empty() ? prepCancelled() : error(err);
     const bool useRoi = roi.active;
     // Decision 72: no 6K. Checked on what the model sees (the crop), before anything is staged.
     if (std::max(roi.box.w, roi.box.h) >= kMaxLongSide)
@@ -1174,6 +1304,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
          kMergeNames[mergeMode]);
     std::string vramJson;
     if (!preflight(modelFrames, roi.box.w, roi.box.h, vramJson)) return;
+    if (prep_ && prep_->cancelled()) return prepCancelled();
     const std::string sig = paramSignature(&roi);
     const std::string root = cacheRoot();
     const std::string jobId = std::to_string(getpid()) + "-" + std::to_string(gJobSeq++) + "-" +
@@ -1192,8 +1323,14 @@ class AlphaGenEffect : public OFX::ImageEffect {
     std::unique_ptr<MotionAnalyzer> analyzer;  // Auto Frame Hold (75)
     if (hold == 0) analyzer.reset(new MotionAnalyzer(cw, ch));
     std::vector<double> motion(n, 0.0);
+    std::vector<float> thumbs;  // the run's matte index (80)
     const auto t0 = std::chrono::steady_clock::now();
     for (int f = 0; f < n; ++f) {
+      if (!prepFrame(1, f, n, t0)) {
+        writer.close();
+        unlink(input.c_str());
+        return prepCancelled();
+      }
       std::unique_ptr<OFX::Image> img;
       try {
         img.reset(src_->fetchImage(double(first + f)));
@@ -1248,6 +1385,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
       }
       if (analyzer) motion[f] = analyzer->endFrame();
       keys[f] = matteKey(hashImage(*img), sig);
+      const std::vector<float> thumb = imageThumb(*img);
+      thumbs.insert(thumbs.end(), thumb.begin(), thumb.end());
       if (!writer.writeFrame(frame.data(), err)) {
         writer.close();
         unlink(input.c_str());
@@ -1255,6 +1394,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       }
     }
     writer.close();
+    if (prep_) prep_->set(1.0, "Starting the job", true);
     const double sec =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     LOGI("process: staged %d frames in %.2f s (%.1f ms/frame), %.1f MB in %s", n, sec,
@@ -1333,18 +1473,20 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const std::string level = logLevel() == LogLevel::Debug ? "debug" : "info";
     // Before the launch: the render Flame triggers right after this button press must already
     // see PROCESSING (test 2: it raced job.py's own markers and showed NOT PROCESSED).
+    // Decision 80: the run's matte index; its id goes into roiState (without one render uses the
+    // exact key, as before 80, so a failed write only loses the tolerance).
+    MatteIndex index;
+    index.first = first, index.width = w, index.height = h, index.sig = sig, index.keys = keys;
+    index.thumbs.swap(thumbs);
+    std::string indexErr;
+    if (writeMatteIndex(indexPath(root, jobId), index, indexErr))
+      roi.run = jobId;
+    else
+      LOGW("process: matte index not written (%s): render will need the exact source", indexErr.c_str());
     setIfChanged(roiState_, formatRoiState(roi));  // render keys on it from now on
     setIfChanged(roiInfo_, useRoi ? "Crop " + std::to_string(roi.box.w) + "x" + std::to_string(roi.box.h)
                                   : std::string("None (alpha opaque)"));
     markPending(root, keys, getpid());
-    // job.py needs numpy: the system python3 has it on Rocky 9 but not on macOS, where the job
-    // runs under the LTX runtime's own Python (decision 65; Setup is stdlib-only and keeps
-    // pythonPath()).
-#ifdef __APPLE__
-    const std::string jobPython = ltxPython.empty() ? pythonPath() : ltxPython;
-#else
-    const std::string jobPython = pythonPath();
-#endif
     const bool ok = launchDetached(
         {jobPython, "-I", "-B", resourcesDir() + "/worker/job.py", manifest},
         cleanEnvironment({"LTXAG_LOG_LEVEL=" + level}), err);
@@ -1352,8 +1494,10 @@ class AlphaGenEffect : public OFX::ImageEffect {
       clearPending(root, keys);
       unlink(input.c_str());
       unlink(manifest.c_str());
+      unlink(indexPath(root, jobId).c_str());
       return error("Could not start processing: " + err);
     }
+    if (prep_) prep_->close();  // job.py's own progress window takes over
     {
       std::lock_guard<std::mutex> lock(jobMutex_);
       lastJobId_ = jobId;
@@ -1465,14 +1609,27 @@ class AlphaGenEffect : public OFX::ImageEffect {
   }
 
   void purgeNode() {
-    const OfxRangeD r = src_->getFrameRange();
-    const std::string sig = paramSignature();
+    const std::string root = cacheRoot();
     std::vector<std::string> keys;
-    for (int t = int(std::lround(r.min)); t <= int(std::lround(r.max)); ++t) {
-      std::unique_ptr<OFX::Image> img(src_->fetchImage(double(t)));
-      if (img) keys.push_back(matteKey(hashImage(*img), sig));
+    // Decision 80: with a run index, its keys (no source frames fetched: that took ~100 s on a
+    // UHD clip). A copy sharing the run loses the mattes too (as before, for the same source).
+    std::string v;
+    roiState_->getValue(v);
+    const std::string run = parseRoiState(v).run;
+    MatteIndex index;
+    if (!run.empty() && readMatteIndex(indexPath(root, run), index)) {
+      keys = index.keys;
+      unlink(indexPath(root, run).c_str());
+      LOGI("purgeNode: run %s from its matte index", run.c_str());
+    } else {
+      const OfxRangeD r = src_->getFrameRange();
+      const std::string sig = paramSignature();
+      for (int t = int(std::lround(r.min)); t <= int(std::lround(r.max)); ++t) {
+        std::unique_ptr<OFX::Image> img(src_->fetchImage(double(t)));
+        if (img) keys.push_back(matteKey(hashImage(*img), sig));
+      }
     }
-    const size_t n = purgeKeys(cacheRoot(), keys);
+    const size_t n = purgeKeys(root, keys);
     LOGI("purgeNode: %zu of %zu frames had cached mattes, removed", n, keys.size());
     setIfChanged(roiState_, "");  // back to never processed: pass-through (decision 71)
     setIfChanged(status_, "Cache purged: " + std::to_string(n) + " frames");
@@ -1617,6 +1774,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
   std::string nodeId_;
   std::mutex jobMutex_;
   std::string lastJobId_;
+  PrepStatus* prep_ = nullptr;  // the preparing window while process() runs (79)
   bool inChangedParam_ = false;
   bool loggedOutput_ = false;
   bool loggedDeliveredCs_ = false;
@@ -1626,6 +1784,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
   std::thread setupWatcher_;
   std::atomic<bool> setupStop_{false};
   bool gateWasClosed_ = false;  // render: refresh the Setup UI once Setup has completed
+  std::unique_ptr<MatteIndex> index_;  // runIndex(): the loaded index of indexPath_ (80)
+  std::string indexPath_;
+  std::string changedLoggedRun_;  // the index whose changed source was logged at WARN
   std::atomic<bool> stopFlag_{false};
 };
 
@@ -1681,8 +1842,9 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     const size_t staged = sweepStaleStaging();
     const SweepResult sw = sweepCache(cacheSettings(loadUserConfig()));
     LOGI("sweep: %zu stale staging file(s); cache aged %zu, capped %zu, kept %zu (%.1f MB), "
-         "freed %.1f MB",
-         staged, sw.aged, sw.capped, sw.kept, sw.bytesKept / 1048576.0, sw.bytesFreed / 1048576.0);
+         "freed %.1f MB; run indexes aged %zu",
+         staged, sw.aged, sw.capped, sw.kept, sw.bytesKept / 1048576.0, sw.bytesFreed / 1048576.0,
+         sw.indexesAged);
     desc.setLabels(kPluginLabel, kPluginLabel, kPluginLabel);
     desc.setPluginGrouping("LTX");
     desc.addSupportedContext(OFX::eContextFilter);

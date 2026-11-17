@@ -63,7 +63,8 @@ test closes the ones it caused.
 | Only Flame (by hand) | layout, the Flame Python hook, anything listed under "Limits" | |
 
 Hosted runners have no usable GPU: the fast tier's `memory_warning` test skips there ("no GPU
-memory information"), like `mac_fp8_refused` on Linux.
+memory information"), like `mac_fp8_refused` on Linux; `prep_window` runs its other checks first,
+then skips its Cancel-during-the-question part.
 
 1. Push a tag `v<LTXAG_VERSION>` (or `v<LTXAG_VERSION>-<suffix>`). CI builds and smoke-tests both
    platforms; only if both pass it publishes a GitHub **pre-release** with both tarballs and

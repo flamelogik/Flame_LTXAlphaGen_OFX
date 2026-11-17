@@ -14,6 +14,7 @@
 
 #include "cache.h"
 #include "half.h"
+#include "matte_index.h"
 #include "platform.h"
 #include "transport.h"
 
@@ -86,6 +87,29 @@ int main() {
   clearPending(root, {"cccccccccccccccc", "dddddddddddddddd"});
   CHECK(!isPending(root, "cccccccccccccccc"), "clearPending left a marker");
 
+  // anyJobActive: a live job's marker blocks; a dead one does not; our own stale marker lapses.
+  CHECK(anyJobActive(root, getpid()), "live job not active");  // 'aaaa…' holds our pid, fresh
+  clearPending(root, {"aaaaaaaaaaaaaaaa"});
+  CHECK(!anyJobActive(root, getpid()), "dead marker blocks Process");
+  std::ofstream(pendingPath(root, "eeeeeeeeeeeeeeee")) << getppid();  // another live process
+  CHECK(anyJobActive(root, getpid()), "other live pid does not block");
+  CHECK(anyJobActive(root, getpid(), 0) , "foreign pid must ignore the grace period");
+  clearPending(root, {"eeeeeeeeeeeeeeee"});
+  markPending(root, {"ffffffffffffffff"}, getpid());
+  CHECK(anyJobActive(root, getpid()), "fresh own marker (launch gap) not active");
+  struct timespec old[2] = {{time(nullptr) - 600, 0}, {time(nullptr) - 600, 0}};
+  utimensat(AT_FDCWD, pendingPath(root, "ffffffffffffffff").c_str(), old, 0);
+  CHECK(!anyJobActive(root, getpid()), "stale own marker blocks forever");
+  clearPending(root, {"ffffffffffffffff"});
+  std::ofstream(pendingPath(root, "aaaaaaaaaaaaaaaa")) << getpid();  // back for the sweep below
+  // Run indexes (decision 80): aged by the sweep like mattes, removed by Purge All.
+  mkdir(indexDir(root).c_str(), 0755);
+  const std::string oldIdx = indexPath(root, "old"), newIdx = indexPath(root, "new");
+  std::ofstream(oldIdx) << "x";
+  std::ofstream(newIdx) << "x";
+  const timespec aged[2] = {{time(nullptr) - 40 * 86400, 0}, {time(nullptr) - 40 * 86400, 0}};
+  utimensat(AT_FDCWD, oldIdx.c_str(), aged, 0);
+
   // Sweep: age limit, then LRU down to the cap.
   CacheSettings s;
   s.root = root;
@@ -104,11 +128,13 @@ int main() {
         "recent entries must survive");
   CHECK(exists(pendingPath(root, "aaaaaaaaaaaaaaaa")), "live pending removed");
   CHECK(!exists(pendingPath(root, "bbbbbbbbbbbbbbbb")), "dead pending kept");
+  CHECK(r.indexesAged == 1 && !exists(oldIdx) && exists(newIdx), "index sweep: aged=%zu", r.indexesAged);
 
   // Purges.
   CHECK(purgeKeys(root, {"c1cccccccccccccc", "nonexistent00000"}) == 1, "purgeKeys");
   CHECK(cacheBytes(root) > 0, "cacheBytes");
   CHECK(purgeAll(root) > 0 && cacheBytes(root) == 0, "purgeAll");
+  CHECK(!exists(newIdx), "purgeAll kept a run index");
 
   // Staging sweep: dead-owner files go, live-owner and live-job files stay.
   const int dead = deadPid();

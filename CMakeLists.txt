@@ -18,9 +18,10 @@ option(LTXAG_DEV_BUILD "Prototype/test build: Prototype page, bypassable licence
 # 0.1.5 = fp16 transformer on Macs where it is faster, system test before releases;
 # 0.2.0 = MATTE MISSING for processed nodes (71), 6K refused with advice (72), install.sh messages;
 # 0.2.1 = Frame Hold for fast motion (74) with Auto per-chunk holds from measured motion (75);
-# 1.0.0 = Input Colour Auto / Bypass (76), first release by CI (77), macOS 15 minimum).
+# 1.0.0 = Input Colour Auto / Bypass (76), first release by CI (77), macOS 15 minimum;
+# 1.0.1 = one Process at a time (78), preparing window (79), per-run matte index (80): fixes #1).
 # Also the OFX plugin version (major.minor) and the release package name.
-set(LTXAG_VERSION "1.0.0")
+set(LTXAG_VERSION "1.0.1")
 string(REPLACE "." ";" LTXAG_VERSION_PARTS "${LTXAG_VERSION}")
 list(GET LTXAG_VERSION_PARTS 0 LTXAG_VERSION_MAJOR)
 list(GET LTXAG_VERSION_PARTS 1 LTXAG_VERSION_MINOR)
@@ -66,7 +67,8 @@ else()
 endif()
 
 # Pure logic, shared with the unit tests.
-add_library(ltxag_core STATIC ofx/src/chunk_plan.cpp ofx/src/vram_estimate.cpp ofx/src/roi.cpp ofx/src/motion.cpp)
+add_library(ltxag_core STATIC ofx/src/chunk_plan.cpp ofx/src/vram_estimate.cpp ofx/src/roi.cpp ofx/src/motion.cpp
+  ofx/src/prep_status.cpp)
 target_include_directories(ltxag_core PUBLIC ofx/src)
 
 add_library(${BUNDLE_NAME} MODULE
@@ -77,6 +79,7 @@ add_library(${BUNDLE_NAME} MODULE
   ofx/src/transport.cpp
   ofx/src/process.cpp
   ofx/src/cache.cpp
+  ofx/src/matte_index.cpp
   ofx/src/marker.cpp
   ofx/src/env_info.cpp)
 target_link_libraries(${BUNDLE_NAME} PRIVATE ofx_support ltxag_core ${LTXAG_PLATFORM_LIBS} pthread)
@@ -127,6 +130,7 @@ add_custom_target(bundle_resources ALL
           ${BUNDLE_DIR}/Contents/Resources/worker/ltxag_worker
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/worker/dummy_worker.py
           ${CMAKE_SOURCE_DIR}/worker/job.py ${CMAKE_SOURCE_DIR}/worker/ltx_worker.py
+          ${CMAKE_SOURCE_DIR}/worker/prep_window.py
           ${BUNDLE_DIR}/Contents/Resources/worker/
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/helper
           ${BUNDLE_DIR}/Contents/Resources/helper
@@ -160,6 +164,10 @@ target_link_libraries(test_cache PRIVATE ${LTXAG_PLATFORM_LIBS})
 target_include_directories(test_cache PRIVATE ofx/src)
 add_test(NAME cache COMMAND test_cache)
 
+add_executable(test_matte_index ofx/tests/test_matte_index.cpp ofx/src/matte_index.cpp)
+target_include_directories(test_matte_index PRIVATE ofx/src)
+add_test(NAME matte_index COMMAND test_matte_index)
+
 add_executable(test_roi ofx/tests/test_roi.cpp)
 target_link_libraries(test_roi PRIVATE ltxag_core)
 add_test(NAME roi COMMAND test_roi)
@@ -176,6 +184,10 @@ add_test(NAME vram_estimate COMMAND test_vram_estimate)
 add_executable(test_motion ofx/tests/test_motion.cpp)
 target_link_libraries(test_motion PRIVATE ltxag_core)
 add_test(NAME motion COMMAND test_motion)
+
+add_executable(test_prep_status ofx/tests/test_prep_status.cpp)
+target_link_libraries(test_prep_status PRIVATE ltxag_core)
+add_test(NAME prep_status COMMAND test_prep_status)
 
 # System test host (systest/README.md): loads the bundle like Flame and runs end-to-end
 # scenarios. Not a ctest: it needs the isolated HOME and fake windows of systest/run_systest.sh.

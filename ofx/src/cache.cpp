@@ -14,6 +14,7 @@
 #include <ctime>
 #include <fstream>
 
+#include "matte_index.h"
 #include "platform.h"
 #include "transport.h"
 
@@ -89,6 +90,25 @@ bool isPending(const std::string& root, const std::string& key) {
   return pidAlive(readPid(p));
 }
 
+bool anyJobActive(const std::string& root, int selfPid, int graceSec) {
+  DIR* d = opendir((root + "/pending").c_str());
+  if (!d) return false;
+  bool active = false;
+  while (!active) {
+    const dirent* e = readdir(d);
+    if (!e) break;
+    if (e->d_name[0] == '.') continue;
+    const std::string p = root + "/pending/" + e->d_name;
+    const int pid = readPid(p);
+    if (!pidAlive(pid)) continue;
+    struct stat st {};
+    if (pid == selfPid && (stat(p.c_str(), &st) != 0 || time(nullptr) - st.st_mtime > graceSec)) continue;
+    active = true;
+  }
+  closedir(d);
+  return active;
+}
+
 void markPending(const std::string& root, const std::vector<std::string>& keys, int pid) {
   mkdir((root + "/pending").c_str(), 0755);
   const std::string text = std::to_string(pid);
@@ -134,6 +154,11 @@ uint64_t purgeAll(const std::string& root) {
       if (endsWith(f, ".matte") && stat(p.c_str(), &st) == 0 && unlink(p.c_str()) == 0)
         freed += uint64_t(st.st_size);
     }
+  }
+  for (const auto& f : listDir(indexDir(root))) {  // run indexes (decision 80)
+    const std::string p = indexDir(root) + "/" + f;
+    struct stat st {};
+    if (stat(p.c_str(), &st) == 0 && unlink(p.c_str()) == 0) freed += uint64_t(st.st_size);
   }
   return freed;
 }
@@ -182,6 +207,13 @@ SweepResult sweepCache(const CacheSettings& s) {
   }
   r.bytesKept = total;
   r.kept = entries.size() - r.capped;
+  // Run indexes (decision 80) unused for maxAgeDays; small, so not part of the size cap.
+  for (const auto& f : listDir(indexDir(s.root))) {
+    const std::string p = indexDir(s.root) + "/" + f;
+    struct stat st {};
+    if (s.maxAgeDays > 0 && stat(p.c_str(), &st) == 0 && now - st.st_mtime > maxAge && unlink(p.c_str()) == 0)
+      ++r.indexesAged;
+  }
   // Pending markers of jobs that no longer run.
   for (const auto& f : listDir(s.root + "/pending")) {
     const std::string p = s.root + "/pending/" + f;

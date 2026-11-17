@@ -63,6 +63,39 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   node); Purge Cache (node) clears it. A duplicate errors too: a copy shares every param, and a
   content record couldn't tell it from an upstream change (user chose the error). How Flame
   shows a failed render, and whether Batch Render stops: UNVERIFIED (test in Flame).
+- **78. One Process at a time** (2026-11-16, Flame test on UHD: clicks queued behind the blocked UI
+  thread, or delivered during the modal VRAM question, ran a second full `process()` while the first
+  job held the GPU; the second job hit the busy worker and died). `process()` holds a process-wide
+  flag for the whole call and refuses while `anyJobActive` (cache.h: a pending marker with a live
+  pid; the plugin's own pre-launch markers count for 120 s only). Not in the cache key.
+  UNVERIFIED in Flame; `test_cache` covers `anyJobActive`.
+- **79. Preparing window** (2026-11-16: UHD from a slow source took ~3.5 min of silent fetching before
+  job.py's window). `process()` launches `worker/prep_window.py` (detached, job.py's Python, `-I -B`)
+  before `computeRoi`; it reuses `oslayer.ProgressWindow` (zenity / Swift helper). Status
+  `<fraction>\n<text>\n` in `stagingDir()/ltxag_<flame pid>_prep.txt` (atomic rename, <= 4/s; file
+  gone = window closes), Cancel marker `..._prep.cancel`, checked before every frame in both loops
+  and after the preflight: partial staging removed, status "Cancelled", no popup. Fraction covers
+  both passes; time left assumes the staging pass costs what the scan did. The VRAM question keeps
+  the window open with a hint. `error()` and RAII close it; closed right after job.py launches.
+  UNVERIFIED in Flame: painting while the UI thread is blocked, real zenity and its stacking with
+  Flame's Yes/No, the macOS helper. Tests: ctest `prep_status`, `test_prep_window.py`, system test
+  `prep_window` (fast tier).
+- **80. Per-run matte index** (user, 2026-11-16; a Neat Video source gives different pixels on re-render, so
+  the exact-hash key missed and 71 aborted the export: no valid output). A matte made by Process stays
+  valid until the user reprocesses: a source that differs never withholds or fails it. Process writes
+  `<root>/index/<run>.idx` (plugin only: header with param signature, per frame the existing matte key
+  + a 32x18 RGB thumbnail; `matte_index.*`); the run id (job id) is the `;<run>` tail of `roiState`,
+  so it is saved and copied with the node and cleared by Purge Cache (node). render: index applies
+  only while its signature equals the current one (settings changes still miss), frame -> key ->
+  matte, always used; a thumbnail difference above `kSourceChangedThreshold` (0.05, tunable, mean
+  |diff| of cell means / (mean + floor 0.01); grain 0.014-0.038, other picture 0.15+) only sets the
+  footer "Source changed since Process" (WARN once per run). Missing file / frame outside the index:
+  PROCESSING and 71 as before. No index (old caches, Purge All): the exact lookup, unchanged. **Copies
+  keep referencing the same results; reprocessing a copy gives it its own run** (changes 71's duplicate
+  error). Purge Cache (node) deletes by the index without fetching frames (the old fetch path remains
+  as the fallback); purging one of two nodes sharing a run removes both's mattes. Indexes age out with
+  the 30-day sweep (not in the 50 GB cap), Purge All removes them. UNVERIFIED in Flame and with
+  Neat Video: whether its variation stays under 0.05 (DEBUG logs the difference per frame).
 - **PROCESSING race (49):** the plugin writes the frames' pending markers itself (Flame's pid)
   just before launching; job.py rewrites them with its pid. Otherwise Flame's render right after
   the button press beat job.py (~50 ms) and showed NOT PROCESSED for the whole job. The plugin's

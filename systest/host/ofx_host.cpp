@@ -455,6 +455,7 @@ OfxStatus messageImpl(void* handle, const char* type, const char* fmt, va_list a
     gHost->errors.push_back("sendMessage from a non-action thread: " + text);
   inst->messages.push_back({type ? type : "", text});
   if (type && std::strcmp(type, kOfxMessageQuestion) == 0) {
+    if (inst->onQuestion) inst->onQuestion();
     Reply r = inst->defaultReply;
     if (!inst->replies.empty()) {
       r = inst->replies.front();
